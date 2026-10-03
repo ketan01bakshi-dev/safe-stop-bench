@@ -1,0 +1,53 @@
+{
+  "_review": "Proposed by ssb.fmu_inspect, then reviewed by hand (2 Oct 2026): every CHECK line confirmed; added Bench_TxOk -> Can_ActBusOk (not inferable from the name); state_values taken from the supplier enumeration (OFF = 0); VEH_Speed factor 3.6 (km/h) confirmed.",
+  "inputs": {
+    "PLN_Command_RxCounter": "Com_PlnCmd_RxCnt",
+    "PLN_Command_DLC": "Com_PlnCmd_Dlc",
+    "PLN_E2E_CRC": "PlnCmd_Crc",
+    "PLN_E2E_Counter": "PlnCmd_AliveCtr",
+    "PLN_TimeStamp": "PlnCmd_Tstamp",
+    "PLN_AccelReq": "PlnCmd_AxReq",
+    "PLN_SteerReq": "PlnCmd_SteerAngReq",
+    "PLN_SpeedReq": "PlnCmd_VReq",
+    "PLN_WdAnswer": "PlnCmd_WdgResp",
+    "PLN_PerceptionHealth": "PlnCmd_PercQly",
+    "PLN_Flags": "PlnCmd_Flg",
+    "PLN_WdKickCounter": "Dio_WdgTrigCnt",
+    "VEH_Speed": {
+      "name": "VehSpd_kph",
+      "factor": 3.6
+    },
+    "VEH_LongAccel": "VehAx",
+    "VEH_RoadWheelAngle": "RoadWhlAng",
+    "VEH_YawRate": "YawRate",
+    "VEH_GradeAccel": "RoadGradeAx",
+    "Bench_PowerOk": "Pwr_SupplyOk",
+    "Bench_Release": "Hmi_OperatorRelease",
+    "Bench_TxOk": "Can_ActBusOk"
+  },
+  "outputs": {
+    "SAF_ActuatorCmd_TxCounter": "Com_ActCmd_TxCnt",
+    "SAF_E2E_CRC": "ActCmd_Crc",
+    "SAF_E2E_Counter": "ActCmd_AliveCtr",
+    "SAF_AccelCmd": "ActCmd_AxCmd",
+    "SAF_SteerCmd": "ActCmd_SteerAngCmd",
+    "SAF_BackupBrake": "ActCmd_BkpBrkReq",
+    "SAF_State": "SfmState",
+    "SAF_Cause": "SfmFaultReason",
+    "SAF_WdChallenge": "Wdg_Challenge",
+    "SAF_MrmRequest": "Mrm_Req",
+    "SAF_AccelOut": "Dbg_AxOut",
+    "SAF_SteerOut": "Dbg_SteerOut"
+  },
+  "parameters": {},
+  "state_values": {
+    "0": "OFF",
+    "1": "INIT",
+    "2": "NORMAL",
+    "3": "DEGRADED",
+    "4": "PULL_OVER",
+    "5": "STOP_IN_LANE",
+    "6": "BRAKE_ONLY_STOP",
+    "7": "BACKUP_BRAKE_STOP"
+  }
+}

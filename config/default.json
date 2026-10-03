@@ -1,0 +1,69 @@
+{
+  "_note": "Illustrative values only. A real project derives them from its own hazard analysis and FTTI (see safety/ftti_sheet in the report).",
+  "name": "default (on-road, 40 km/h ODD)",
+  "road": {
+    "mu": 0.8,
+    "grade_pct": 0.0,
+    "lane_half_width_m": 1.75
+  },
+  "plant": {
+    "wheelbase_m": 2.7,
+    "long_dead_time_ms": 80,
+    "long_tau_s": 0.1,
+    "max_accel": 2.5,
+    "steer_rate_dps": 20.0,
+    "steer_tau_s": 0.05,
+    "max_steer_deg": 30.0,
+    "backup_decel": 2.0
+  },
+  "buses": {
+    "planner": {
+      "frames_per_ms": 4,
+      "latency_ms": 1,
+      "fd": true
+    },
+    "actuator": {
+      "frames_per_ms": 3,
+      "latency_ms": 1,
+      "fd": false
+    }
+  },
+  "ecu": {
+    "timeout_ms": 100,
+    "fallback_decel": 3.0
+  },
+  "safety": {
+    "cmd_timeout_ms": 100,
+    "max_age_ms": 60,
+    "wd_window_min_ms": 10,
+    "wd_window_max_ms": 60,
+    "wd_early_kicks": 3,
+    "steer_rate_max_dps": 60.0,
+    "steer_rate_slope": 1.2,
+    "steer_rate_min_dps": 15.0,
+    "odd_max_kmh": 40.0,
+    "max_accel": 2.5,
+    "min_accel": -6.0,
+    "max_jerk": 10.0,
+    "env_debounce_ms": 50,
+    "steer_mismatch_deg": 2.0,
+    "steer_mismatch_ms": 150,
+    "brake_min_ratio": 0.5,
+    "brake_mismatch_ms": 400,
+    "degraded_cap_kmh": 15.0,
+    "degraded_recover_ms": 1000,
+    "mrm_decel": 3.0,
+    "mrm_jerk": 4.0,
+    "brake_only_decel": 4.0,
+    "emergency_jerk": 8.0,
+    "release_clear_ms": 500
+  },
+  "frictions": {
+    "dry": 0.8,
+    "wet": 0.5,
+    "gravel": 0.4
+  },
+  "known_findings": {
+    "bv_steer_rate_40kmh_16dps": "At 40 km/h the 26 m stop drifts ~1.0 m sideways: the safety controller holds heading but has no lane information. Options: follow the planner's last valid path, or a higher stop deceleration at speed."
+  }
+}

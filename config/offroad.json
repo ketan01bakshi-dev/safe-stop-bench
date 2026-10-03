@@ -1,0 +1,15 @@
+{
+  "_inherits": "default.json",
+  "name": "off-road (gravel, 8% grade, 25 km/h ODD)",
+  "road": {
+    "mu": 0.4,
+    "grade_pct": 8.0,
+    "lane_half_width_m": 2.5
+  },
+  "safety": {
+    "odd_max_kmh": 25.0
+  },
+  "known_findings": {
+    "brake_weak": "On gravel with an 8% grade the weak-brake check detects at ~620 ms, 20 ms over its 600 ms budget. Shorten the 400 ms debounce off-road, or derive the budget per ODD."
+  }
+}

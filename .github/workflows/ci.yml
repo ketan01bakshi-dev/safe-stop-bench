@@ -1,0 +1,32 @@
+name: safe-stop-bench-v2
+on: [push, pull_request]
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        config: [config/default.json, config/offroad.json]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest discover -s tests -v
+      - run: python run.py --config ${{ matrix.config }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-${{ strategy.job-index }}
+          path: reports/
+  full:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python run.py --full
+      - uses: mikepenz/action-junit-report@v4
+        if: always()
+        with:
+          report_paths: reports/*_junit.xml

@@ -1,0 +1,46 @@
+{
+  "_note": "A light hazard → safety goal → requirement chain for the SKETCH. Not a real HARA: integrity levels and FTTIs are placeholders to show the structure.",
+  "hazards": [
+    {"id": "H1", "text": "Vehicle keeps moving after the planner or its command link fails", "goal": "SG1"},
+    {"id": "H2", "text": "Planner is alive but commands something unsafe (steering, speed, acceleration)", "goal": "SG2"},
+    {"id": "H3", "text": "An actuator does not follow its command", "goal": "SG3"},
+    {"id": "H4", "text": "Commands from the safety controller to the actuators are lost or corrupted", "goal": "SG4"},
+    {"id": "H5", "text": "Perception degrades or the vehicle leaves its ODD", "goal": "SG5"},
+    {"id": "H6", "text": "The safety controller itself resets while driving", "goal": "SG6"},
+    {"id": "H7", "text": "The safety layer stops the vehicle without a reason (false stop), so the team disables it", "goal": "SG7"}
+  ],
+  "goals": {
+    "SG1": "On loss of valid planner control, reach a minimal risk condition",
+    "SG2": "Never pass a command outside the safe envelope to the actuators",
+    "SG3": "Detect actuator faults and stop with whatever still works",
+    "SG4": "The actuator layer stops the vehicle on its own if the safety controller's commands fail",
+    "SG5": "Match the driving mode to perception capability",
+    "SG6": "Come back from a reset in a safe, latched state",
+    "SG7": "No reaction under normal operation, including tolerated bus imperfections"
+  },
+  "requirements": {
+    "SR-01": {"goal": "SG1", "text": "No valid command for > 100 ms → stop in lane", "ftti_ms": 250},
+    "SR-02": {"goal": "SG1", "text": "E2E window INVALID (bad CRC, repeated, wrong sequence, wrong data ID) → stop in lane", "ftti_ms": 250},
+    "SR-03": {"goal": "SG1", "text": "Command timestamp older than 60 ms on 3 frames → stop in lane", "ftti_ms": 250},
+    "SR-04": {"goal": "SG1", "text": "Watchdog: no kick > 60 ms, 3 early kicks, or 3 wrong challenge answers → stop in lane", "ftti_ms": 250},
+    "SR-05": {"goal": "SG1", "text": "A stop is latched; release only when stopped, fault clear ≥ 500 ms and an operator confirms", "ftti_ms": null},
+    "SR-06": {"goal": "SG1", "text": "At startup, no motion until 2 valid commands and a healthy watchdog", "ftti_ms": null},
+    "SR-07": {"goal": "SG2", "text": "Steering rate above the speed-dependent limit is clamped at once; stop if it persists ≥ 50 ms", "ftti_ms": 200},
+    "SR-08": {"goal": "SG2", "text": "Speed request above the ODD limit is clamped; stop if it persists ≥ 50 ms", "ftti_ms": 200},
+    "SR-09": {"goal": "SG2", "text": "Acceleration outside −6…+2.5 m/s² is clamped (jerk ≤ 10 m/s³); stop if it persists ≥ 50 ms", "ftti_ms": 200},
+    "SR-10": {"goal": "SG3", "text": "Steering commanded vs measured > 2° for 150 ms → brake-only stop (measured from the start of the manoeuvre that exposes it)", "ftti_ms": 400},
+    "SR-11": {"goal": "SG3", "text": "Braking achieves < 50% of demand for 400 ms → stop with backup brake", "ftti_ms": 600},
+    "SR-12": {"goal": "SG4", "text": "Actuator ECU: safety commands missing > 100 ms or E2E (Profile 2) INVALID → ECU's own stop", "ftti_ms": 250},
+    "SR-13": {"goal": "SG4", "text": "Safety controller detects its own transmit bus-off → stop in lane", "ftti_ms": 250},
+    "SR-14": {"goal": "SG5", "text": "Perception degraded → cap speed at 15 km/h", "ftti_ms": 500},
+    "SR-15": {"goal": "SG5", "text": "ODD exit with perception healthy → planner-executed pull-over to the shoulder", "ftti_ms": 500},
+    "SR-16": {"goal": "SG5", "text": "Perception lost → stop in lane", "ftti_ms": 250},
+    "SR-17": {"goal": "SG6", "text": "After a safety-controller reset → latched stop in lane", "ftti_ms": 300},
+    "SR-18": {"goal": "SG7", "text": "No reaction to: single bad frames, counter gaps ≤ max delta, counter wrap, jitter up to 15 ms (below the 20 ms frame period), one reordered frame, 0.5% random CRC errors", "ftti_ms": null}
+  },
+  "ftti_derivation": [
+    {"req": "SR-01", "speed_kmh": 40, "hazard": "drift out of a 1.75 m half-lane with a stale steering command of 2°", "assumption": "lateral drift ≈ ½·(v²/L)·tan(δ)·t² reaches 0.9 m margin in ≈ 0.45 s at 40 km/h", "budget": "detection 250 ms + reaction start ≤ 450 ms"},
+    {"req": "SR-07", "speed_kmh": 30, "hazard": "steering ramp at 90 °/s", "assumption": "a 2.5° error is reached in ~30 ms; the clamp acts at once, the stop follows after 50 ms debounce", "budget": "detection ≤ 200 ms"},
+    {"req": "SR-11", "speed_kmh": 30, "hazard": "weak brake on a planned stop", "assumption": "stopping distance grows ~3× with 30% braking; backup brake must start within 0.6 s", "budget": "detection ≤ 600 ms"}
+  ]
+}

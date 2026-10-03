@@ -1,0 +1,11 @@
+{
+  "_note": "SOTIF (ISO 21448) triggering conditions for the planner/perception side. This bench tests the safety layer AROUND the planner; most items need scenario simulation or field-log replay with real sensor data. Illustrative list.",
+  "items": [
+    {"id": "TC-01", "condition": "Low sun / glare blinds the front camera", "effect": "Missed or late object detection", "bench_coverage": "partial", "how": "Perception-health input only (SC-27, SC-29); the detection itself needs sensor simulation"},
+    {"id": "TC-02", "condition": "Dust or rain on off-road tracks", "effect": "LiDAR returns degrade", "bench_coverage": "partial", "how": "Perception-health input only"},
+    {"id": "TC-03", "condition": "Unmarked or broken lane edges on Indian roads", "effect": "Lateral position uncertainty", "bench_coverage": "not covered", "how": "Needs scenario simulation or replay of real logs"},
+    {"id": "TC-04", "condition": "Animals, hand-carts or wrong-way vehicles", "effect": "Planner meets a situation absent from training", "bench_coverage": "partial", "how": "Envelope and ODD-exit reactions are covered (SC-12…SC-14, SC-28); the planner's decision is not"},
+    {"id": "TC-05", "condition": "Steep grade with loose gravel", "effect": "Longer stopping distance than planned", "bench_coverage": "covered", "how": "Friction/grade sweep and the off-road config"},
+    {"id": "TC-06", "condition": "Night driving with oncoming high beams", "effect": "Camera saturation", "bench_coverage": "not covered", "how": "Needs sensor simulation"}
+  ]
+}

@@ -1,0 +1,18 @@
+[project]
+name = "safe-stop-bench"
+version = "2.3.0"
+description = "SiL bench for an autonomous vehicle's safety layer: E2E, watchdogs, envelope, actuator checks, latched minimal risk manoeuvres"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+fmu = ["fmpy", "pythonfmu", "cantools"]   # FmuDUT adapter + building the reference FMUs (tested, v2.2)
+can = ["python-can", "cantools", "msgpack"] # CanDUT adapter (tested, v2.1)
+hil = ["pyserial", "ziglang"]               # ESP32-S3 PiL/HiL link + building the C++ core for the PC (v2.3)
+dev = ["ruff", "mypy"]
+
+[tool.ruff]
+line-length = 140
+
+[tool.setuptools]
+packages = ["ssb"]

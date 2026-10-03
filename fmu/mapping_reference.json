@@ -1,0 +1,53 @@
+{
+  "inputs": {
+    "PLN_Command_RxCounter": "PLN_Command_RxCounter",
+    "PLN_Command_DLC": "PLN_Command_DLC",
+    "PLN_E2E_CRC": "PLN_E2E_CRC",
+    "PLN_E2E_Counter": "PLN_E2E_Counter",
+    "PLN_TimeStamp": "PLN_TimeStamp",
+    "PLN_AccelReq": "PLN_AccelReq",
+    "PLN_SteerReq": "PLN_SteerReq",
+    "PLN_SpeedReq": "PLN_SpeedReq",
+    "PLN_WdAnswer": "PLN_WdAnswer",
+    "PLN_PerceptionHealth": "PLN_PerceptionHealth",
+    "PLN_Flags": "PLN_Flags",
+    "PLN_WdKickCounter": "PLN_WdKickCounter",
+    "VEH_Speed": "VEH_Speed",
+    "VEH_LongAccel": "VEH_LongAccel",
+    "VEH_RoadWheelAngle": "VEH_RoadWheelAngle",
+    "VEH_YawRate": "VEH_YawRate",
+    "VEH_GradeAccel": "VEH_GradeAccel",
+    "Bench_PowerOk": "Bench_PowerOk",
+    "Bench_TxOk": "Bench_TxOk",
+    "Bench_Release": "Bench_Release"
+  },
+  "outputs": {
+    "SAF_ActuatorCmd_TxCounter": "SAF_ActuatorCmd_TxCounter",
+    "SAF_E2E_CRC": "SAF_E2E_CRC",
+    "SAF_E2E_Counter": "SAF_E2E_Counter",
+    "SAF_AccelCmd": "SAF_AccelCmd",
+    "SAF_SteerCmd": "SAF_SteerCmd",
+    "SAF_BackupBrake": "SAF_BackupBrake",
+    "SAF_State": "SAF_State",
+    "SAF_Cause": "SAF_Cause",
+    "SAF_WdChallenge": "SAF_WdChallenge",
+    "SAF_MrmRequest": "SAF_MrmRequest",
+    "SAF_AccelOut": "SAF_AccelOut",
+    "SAF_SteerOut": "SAF_SteerOut"
+  },
+  "parameters": {
+    "Bench_WarmStart": "Bench_WarmStart",
+    "Bench_Defects": "Bench_Defects",
+    "Bench_Config": "Bench_Config"
+  },
+  "state_values": {
+    "0": "INIT",
+    "1": "NORMAL",
+    "2": "DEGRADED",
+    "3": "PULL_OVER",
+    "4": "STOP_IN_LANE",
+    "5": "BRAKE_ONLY_STOP",
+    "6": "BACKUP_BRAKE_STOP",
+    "7": "OFF"
+  }
+}
