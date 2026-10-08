@@ -71,13 +71,24 @@ def write_all(out_dir: Path, results: list, extras: dict, label: str = "report")
 
 
 def _junit(path: Path, results: list) -> None:
-    fails = sum(not r["verdict"]["passed"] for r in results)
+    # A KNOWN finding (documented in the config, run.py exits 0) is <skipped> with its reason, not <failure>: JUnit has no
+    # "known issue" status, and as a failure it turned the CI report check red while every job passed (v2.11).
+    fails = skips = 0
     cases = []
     for r in results:
-        body = "" if r["verdict"]["passed"] else f'<failure message="{escape(", ".join(c for c, ok in r["verdict"]["checks"] if not ok))}"/>'
+        v = r["verdict"]
+        failed = ", ".join(c for c, ok in v["checks"] if not ok)
+        if v["passed"]:
+            body = ""
+        elif v.get("status") == "KNOWN":
+            skips += 1
+            body = f'<skipped message="{escape(f"known finding: {v.get("known")} (failed: {failed})")}"/>'
+        else:
+            fails += 1
+            body = f'<failure message="{escape(failed)}"/>'
         cases.append(f'<testcase classname="safe_stop_bench" name="{escape(r["key"])}">{body}</testcase>')
-    path.write_text(f'<?xml version="1.0" encoding="UTF-8"?>\n<testsuite name="safe-stop-bench" tests="{len(results)}" failures="{fails}">'
-                    + "".join(cases) + "</testsuite>\n", encoding="utf-8")
+    path.write_text(f'<?xml version="1.0" encoding="UTF-8"?>\n<testsuite name="safe-stop-bench" tests="{len(results)}" '
+                    f'failures="{fails}" skipped="{skips}">' + "".join(cases) + "</testsuite>\n", encoding="utf-8")
 
 
 def _html(results, ex, meta, prev) -> str:
