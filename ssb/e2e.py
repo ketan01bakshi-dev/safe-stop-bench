@@ -35,11 +35,16 @@ def crc8_h2f(data: bytes, crc: int = 0xFF) -> int:
 class _Receiver:
     counter_mod = 256
 
-    def __init__(self, max_delta: int):
+    def __init__(self, max_delta: int, explain_gaps: bool = False):
         self.max_delta = max_delta
         self.last: int | None = None
+        # v2.6 option: a counter jump fully explained by the CRC failures just before it is not a second error
+        # (two corrupted frames + the next good one would otherwise count as three errors for one noise burst)
+        self.explain_gaps = explain_gaps
+        self.crc_fails = 0
 
     def _sequence(self, counter: int) -> str:
+        explained, self.crc_fails = self.crc_fails, 0
         if self.last is None:
             self.last = counter
             return OK
@@ -49,7 +54,8 @@ class _Receiver:
         self.last = counter
         if delta == 1:
             return OK
-        return OK_SOME_LOST if delta <= self.max_delta else WRONG_SEQUENCE
+        limit = self.max_delta + (explained if self.explain_gaps else 0)
+        return OK_SOME_LOST if delta <= limit else WRONG_SEQUENCE
 
 
 class Profile5:
@@ -64,17 +70,19 @@ class Profile5:
     class Receiver(_Receiver):
         counter_mod = 256
 
-        def __init__(self, data_id: int, max_delta: int = 2):
-            super().__init__(max_delta)
+        def __init__(self, data_id: int, max_delta: int = 2, explain_gaps: bool = False):
+            super().__init__(max_delta, explain_gaps)
             self.data_id = data_id
 
         def check(self, frame: bytes | None) -> tuple[str, bytes | None]:
             if frame is None:
                 return NO_NEW_DATA, None
             if len(frame) < 3:
+                self.crc_fails += 1
                 return WRONG_CRC, None
             counter, payload = frame[2], frame[3:]
             if crc16_ccitt(bytes([counter]) + payload + self.data_id.to_bytes(2, "little")) != int.from_bytes(frame[:2], "little"):
+                self.crc_fails += 1
                 return WRONG_CRC, None
             status = self._sequence(counter)
             return status, (payload if status in VALID else None)
@@ -95,7 +103,7 @@ class Profile2:
     class Receiver(_Receiver):
         counter_mod = 16
 
-        def __init__(self, id_list: bytes = None, max_delta: int = 2):
+        def __init__(self, id_list: bytes | None = None, max_delta: int = 2):
             super().__init__(max_delta)
             self.id_list = id_list or Profile2.DEFAULT_ID_LIST
 
@@ -125,14 +133,14 @@ class E2EStateMachine:
 
     def __init__(self, window: int = 6, min_ok_init: int = 2, max_err_init: int = 1,
                  min_ok_valid: int = 3, max_err_valid: int = 2, min_ok_invalid: int = 4, max_err_invalid: int = 0):
-        self.window = deque(maxlen=window)
+        self.window: deque[str] = deque(maxlen=window)
         self.min_ok_init, self.max_err_init = min_ok_init, max_err_init
         self.min_ok_valid, self.max_err_valid = min_ok_valid, max_err_valid
         self.min_ok_invalid, self.max_err_invalid = min_ok_invalid, max_err_invalid
         self.state = "NODATA"
 
     def preset_valid(self) -> None:
-        self.window.extend([OK] * self.window.maxlen)
+        self.window.extend([OK] * (self.window.maxlen or 0))
         self.state = "VALID"
 
     def update(self, status: str) -> str:
@@ -156,3 +164,68 @@ class E2EStateMachine:
             if len(recent) == self.min_ok_invalid and all(s in VALID for s in recent):
                 self.state = "VALID"
         return self.state
+
+
+# ---- SAF_Status (0x201) ------------------------------------------------------------------------------------------------
+# One layout at every level since v2.10 (it was the C++ core's alone in v2.9.6; the CAN-process vECU's DBC frame had no
+# protection): CRC-8 | alive counter | state:3 mrm:1 cause:4 | challenge | accel out (int16, 0.01) | steer out (int16, 0.01).
+# The CRC (CRC-8 0x2F, as Profile 2) covers bytes 1-7 plus the data ID 0x201 (LE). Found on hardware: without a counter
+# a stale copy of an old status could not be rejected (v2.9.3-v2.9.6).
+STATUS_ID = 0x201
+
+
+def _i16(x: float) -> int:
+    return max(-32768, min(32767, round(x * 100)))   # round(): half to even, as nearbyint() in the C++ core
+
+
+def status_protect(counter: int, state: int, mrm: bool, cause: int, challenge: int, accel: float, steer: float) -> bytes:
+    if not (0 <= state < 8 and 0 <= cause < 16):
+        raise ValueError(f"SAF_Status packs the state in 3 bits and the cause in 4: state={state}, cause={cause}")
+    body = (bytes([counter & 0xFF, state | (0x08 if mrm else 0) | cause << 4, challenge & 0xFF])
+            + _i16(max(-327.0, min(327.0, accel))).to_bytes(2, "little", signed=True)
+            + _i16(max(-327.0, min(327.0, steer))).to_bytes(2, "little", signed=True))
+    return bytes([crc8_h2f(body + STATUS_ID.to_bytes(2, "little"))]) + body
+
+
+def status_unpack(data: bytes) -> dict:
+    """The fields of an 8-byte SAF_Status, unchecked (run StatusReceiver.check first)."""
+    p = data[2]
+    return {"counter": data[1], "state": p & 0x07, "mrm": bool(p & 0x08), "cause": p >> 4, "challenge": data[3],
+            "accel": int.from_bytes(data[4:6], "little", signed=True) / 100,
+            "steer": int.from_bytes(data[6:8], "little", signed=True) / 100}
+
+
+class StatusReceiver:
+    """SAF_Status E2E check (HiL v2.9.6; shared with the CAN-process bench in v2.10). CRC first, then an 8-bit alive
+    counter that must advance by 1..MAX_DELTA (one lost frame tolerated). A repeat or a jump is rejected; after a jump
+    (e.g. the DUT reset and restarted its counter) two consecutive frames in sequence resynchronise, or at once if the
+    last accepted frame said OFF (the DUT announced it was going down, so a restart is expected). A stale copy of an
+    old status passes only if its counter happens to fit: about 2 in 256, against always without the counter."""
+    MAX_DELTA = 2
+    OFF = 7
+
+    def __init__(self):
+        self.n_crc = self.n_seq = 0
+        self.reset()
+
+    def reset(self) -> None:
+        """The sender's counter restarts (the bench reset it): accept the next valid frame as the first."""
+        self.last: int | None = None
+        self.cand: int | None = None
+        self.last_off = False
+
+    def check(self, data: bytes) -> bool:
+        if len(data) != 8 or crc8_h2f(bytes(data[1:8]) + STATUS_ID.to_bytes(2, "little")) != data[0]:
+            self.n_crc += 1
+            return False
+        c = data[1]
+        ok = (self.last is None                                         # first frame
+              or 1 <= (c - self.last) % 256 <= self.MAX_DELTA            # in sequence
+              or self.last_off                                          # the DUT said OFF: a restart is expected
+              or (self.cand is not None and (c - self.cand) % 256 == 1))   # two in a row: resync
+        if not ok:
+            self.cand = c
+            self.n_seq += 1
+            return False
+        self.last, self.cand, self.last_off = c, None, (data[2] & 0x07) == self.OFF
+        return True

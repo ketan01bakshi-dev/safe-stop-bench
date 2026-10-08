@@ -28,12 +28,14 @@ BO_ 512 SAF_ActuatorCmd: 7 SAFETY
  SG_ SAF_BackupBrake : 48|1@1+ (1,0) [0|1] "" ACT_ECU
 
 BO_ 513 SAF_Status: 8 SAFETY
- SG_ SAF_State : 0|8@1+ (1,0) [0|8] "" BENCH,PLANNER
- SG_ SAF_Cause : 8|8@1+ (1,0) [0|31] "" BENCH
- SG_ SAF_WdChallenge : 16|8@1+ (1,0) [0|255] "" PLANNER
- SG_ SAF_MrmRequest : 24|8@1+ (1,0) [0|2] "" PLANNER
- SG_ SAF_AccelOut : 32|16@1- (0.01,0) [-327.68|327.67] "m/s2" BENCH
- SG_ SAF_SteerOut : 48|16@1- (0.01,0) [-327.68|327.67] "deg" BENCH
+ SG_ SAF_Status_CRC : 0|8@1+ (1,0) [0|255] "" BENCH,PLANNER
+ SG_ SAF_Status_Counter : 8|8@1+ (1,0) [0|255] "" BENCH,PLANNER
+ SG_ SAF_State : 16|3@1+ (1,0) [0|7] "" BENCH,PLANNER
+ SG_ SAF_MrmRequest : 19|1@1+ (1,0) [0|1] "" PLANNER
+ SG_ SAF_Cause : 20|4@1+ (1,0) [0|15] "" BENCH
+ SG_ SAF_WdChallenge : 24|8@1+ (1,0) [0|255] "" PLANNER
+ SG_ SAF_AccelOut : 32|16@1- (0.01,0) [-327|327] "m/s2" BENCH
+ SG_ SAF_SteerOut : 48|16@1- (0.01,0) [-327|327] "deg" BENCH
 
 BO_ 768 VEH_Feedback: 12 BENCH
  SG_ VEH_Speed : 0|16@1+ (0.01,0) [0|655.35] "m/s" SAFETY
@@ -48,13 +50,16 @@ BO_ 769 BENCH_Control: 4 BENCH
  SG_ BENCH_PowerOk : 2|1@1+ (1,0) [0|1] "" SAFETY
  SG_ BENCH_TxOk : 3|1@1+ (1,0) [0|1] "" SAFETY
  SG_ BENCH_Release : 4|1@1+ (1,0) [0|1] "" SAFETY
+ SG_ BENCH_Lockstep : 5|1@1+ (1,0) [0|1] "" SAFETY
  SG_ BENCH_Defects : 8|24@1+ (1,0) [0|16777215] "" SAFETY
 
 CM_ BO_ 256 "Planner command, CAN FD (DLC 16, bytes 14-15 padding), 20 ms, E2E Profile 5 (data ID 0x1234, inside the CRC).";
 CM_ BO_ 257 "Watchdog kick. On a real vehicle a hardware line (GPIO); carried on CAN here so a separate-process vECU can see it.";
 CM_ BO_ 512 "Safety-controller command to the actuator ECU, classic CAN, 10 ms, E2E Profile 2 (data ID list 0x10..0x1F).";
-CM_ BO_ 513 "Safety-controller status, 10 ms: state, first cause, watchdog challenge for the planner, MRM request, and the command it is sending.";
+CM_ BO_ 513 "Safety-controller status, 10 ms: state, first cause, watchdog challenge for the planner, MRM request, and the command it is sending. E2E-protected (v2.10, the same layout as the C++ core since v2.9.6): CRC-8 0x2F (init 0xFF, xor 0xFF) over bytes 1-7 plus data ID 0x201 (LE), and an 8-bit alive counter, +1 per cycle, restarting at 0 on a controller reset.";
+CM_ SG_ 513 SAF_Status_Counter "Receiver: accept a step of 1-2; reject repeats and jumps; resynchronise after two frames in sequence, or at once after a status that said OFF.";
 CM_ BO_ 768 "Vehicle sensors (wheel speed, IMU, steering angle) from the bench plant, 1 ms. VEH_SimTime aligns the vECU's clock.";
-CM_ BO_ 769 "Test-harness control: reset (1 = warm, 2 = cold), power, transmit status, operator release, mutant bitmask. Not part of a real vehicle.";
+CM_ BO_ 769 "Test-harness control: reset (1 = warm, 2 = cold), power, transmit status, operator release, lockstep, mutant bitmask. Not part of a real vehicle.";
+CM_ SG_ 769 BENCH_Lockstep "v2.11: 1 = the bench waits for each 10 ms cycle. The vECU runs cycle T as soon as VEH_Feedback(T) arrives (the bench sends it after every other input for ms T), and stamps a kick or release received after VEH_Feedback(T) with T+1.";
 VAL_ 513 SAF_State 0 "INIT" 1 "NORMAL" 2 "DEGRADED" 3 "PULL_OVER" 4 "STOP_IN_LANE" 5 "BRAKE_ONLY_STOP" 6 "BACKUP_BRAKE_STOP" 7 "OFF" ;
 VAL_ 513 SAF_MrmRequest 0 "NONE" 1 "PULL_OVER" ;

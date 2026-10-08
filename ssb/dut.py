@@ -12,6 +12,7 @@ import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import e2e
 from .safety import CYCLE_MS, SafetyController
 
 
@@ -23,13 +24,22 @@ class Outputs:
     challenge: int = 0
     mrm_request: str | None = None
     out_cmd: tuple = (0.0, 0.0, False)               # (accel, steer, backup) the DUT is commanding
+    # (DUT cycle time in ms, commanded steer) from the DUT's own clock, when the bench only sees it through a link
+    # (HiL/PiL). The slew invariant then uses this time base, not the PC's arrival time (v2.9.1).
+    cycle: tuple | None = None
+
+
+class BenchFault(RuntimeError):
+    """The bench (observer, link, bus node) failed, not the DUT. The runner reruns the scenario instead of judging it."""
 
 
 class DeviceUnderTest:
     name = "abstract"
+    defects: frozenset = frozenset()   # seeded mutants (reference-derived DUTs only)
 
     def reset(self) -> None: ...
-    def step(self, t: int, frames: list, kicks: list[int], fb: dict, release: bool, power_ok: bool, tx_ok: bool) -> Outputs: ...
+    def step(self, t: int, frames: list, kicks: list[int], fb: dict, release: bool, power_ok: bool, tx_ok: bool) -> Outputs:
+        raise NotImplementedError
     def identity(self) -> str:
         return self.name
 
@@ -164,7 +174,7 @@ class FmuDUT(BlackBoxObserver, DeviceUnderTest):
         self.out_names = [n for n, *_ in self.contract.OUTPUTS if n in self.io]
 
     def _set(self, values: dict) -> None:
-        by = {"Real": ([], []), "Integer": ([], []), "Boolean": ([], []), "String": ([], [])}
+        by: dict[str, tuple[list, list]] = {"Real": ([], []), "Integer": ([], []), "Boolean": ([], []), "String": ([], [])}
         for bench, val in values.items():
             vr, vt, f, o = self.io[bench]
             by[vt][0].append(vr)
@@ -179,7 +189,7 @@ class FmuDUT(BlackBoxObserver, DeviceUnderTest):
         for vt, getter in (("Real", self.fmu.getReal), ("Integer", self.fmu.getInteger), ("Boolean", self.fmu.getBoolean)):
             names = [n for n in self.out_names if self.io[n][1] == vt]
             if names:
-                for n, val in zip(names, getter([self.io[n][0] for n in names])):
+                for n, val in zip(names, getter([self.io[n][0] for n in names]), strict=True):
                     _, _, f, o = self.io[n]
                     out[n] = (val - o) / f if vt == "Real" else val
         return out
@@ -187,8 +197,8 @@ class FmuDUT(BlackBoxObserver, DeviceUnderTest):
     # ---- lifecycle -----------------------------------------------------------------------------------------------
     def prepare(self, warm_start: bool, defects: frozenset = frozenset()) -> None:
         """Back to a clean start before every scenario: one instance per campaign, fmi2Reset between scenarios.
-        Finding (v2.2): with PythonFMU 0.7.0, fmi2Instantiate after fmi2FreeInstance in the same process is an access
-        violation (the whole bench dies). `python -m ssb.fmu_inspect --lifecycle` tests this in a subprocess on intake."""
+        One instance + fmi2Reset is cheaper than free/instantiate and needs no DLL reload (FMPy's freeInstance also
+        unloads the DLL). `python -m ssb.fmu_inspect --lifecycle` tests both paths in a subprocess on intake."""
         self.defects = frozenset(defects)
         if self.live:
             self.fmu.terminate()
@@ -197,7 +207,7 @@ class FmuDUT(BlackBoxObserver, DeviceUnderTest):
             self.fmu.instantiate()
             self.live = True
         self.fmu.setupExperiment(startTime=0.0)
-        params = {}
+        params: dict[str, object] = {}
         if "Bench_WarmStart" in self.io:
             params["Bench_WarmStart"] = bool(warm_start)
         if "Bench_Config" in self.io:
@@ -276,18 +286,43 @@ class CanDUT(BlackBoxObserver, DeviceUnderTest):
     true black box and lets back-to-back runs prove the adapter. For a supplied vECU, pass `launch=None` and start theirs
     on the same interface/channel; it must speak the DBC in dbc/safe_stop.dbc.
     Real time: the runner paces 1 simulated ms per wall-clock ms; timing now includes real transport and scheduling.
+
+    v2.10: SAF_Status is E2E-protected (CRC-8 + alive counter, the C++ core's layout) and every status frame passes
+    e2e.StatusReceiver, the same check as the HiL bench, before the observer uses it. `status_replay` puts a stale copy
+    on the bus to prove it: {"capture_ms": t, "inject_ms": [t1, ...]} records the status frame seen at t and sends it
+    again, byte for byte, from a second sender at each t_i. `status_e2e=False` turns the check off (the negative test).
+
+    v2.11, `lockstep=True`: not paced. The bench sends every input for ms t and then VEH_Feedback(t) (always in that
+    order), and at each 10 ms boundary waits until the vECU's status for that cycle has arrived; the SAF_Status alive
+    counter, +1 per cycle since the reset, says which cycle a status belongs to. The vECU (told by BENCH_Lockstep) runs
+    cycle T as soon as VEH_Feedback(T) arrives. A host stall then only makes the run slower: it can't change a verdict,
+    and the bench's real-time guard no longer applies. Tests the logic and the CAN interface (DBC, E2E, ordering), not
+    transport latency; real time stays the default for that.
     """
     realtime = True
+    LOCKSTEP_TIMEOUT_S = 2.0
 
-    def __init__(self, interface: str = "udp_multicast", channel: str | None = None, launch: list | None = "reference",
-                 config_path: str = "config/default.json"):
+    def __init__(self, interface: str = "udp_multicast", channel: str | None = None, launch: str | list | None = "reference",
+                 config_path: str = "config/default.json", status_replay: dict | None = None, status_e2e: bool = True,
+                 lockstep: bool = False):
         import subprocess
         import sys
         import time
+
         from . import canio
         self.canio, self.time = canio, time
         self.db = canio.load_dbc()
         self.bus = canio.DedupBus(interface, channel or canio.GROUP)
+        self.status_replay, self.status_e2e = status_replay, status_e2e
+        self.lockstep, self.realtime = lockstep, not lockstep
+        self.cycle_seen, self.status_c = 0, None
+        self.inj = None
+        if status_replay:
+            self.inj = canio.DedupBus(interface, channel or canio.GROUP)
+            self.inj.pid = f"{self.inj.pid}-replay"   # a second sender: its frames are not the bench's own
+            self.inj.send(0x7FF, b"")   # warm up the socket outside the real-time loop (an ID nobody reads)
+        self.status_rx = e2e.StatusReceiver()
+        self.n_replays_sent = 0
         self.proc = None
         if launch == "reference":
             launch = [sys.executable, "-m", "ssb.vecu_process", "--interface", interface, "--channel", channel or canio.GROUP,
@@ -312,16 +347,23 @@ class CanDUT(BlackBoxObserver, DeviceUnderTest):
         from .safety import MUTANTS
         mask = sum(1 << k for k, n in enumerate(MUTANTS) if n in self.defects)
         self.bus.send(self.canio.ID["ctrl"], self.db.encode_message("BENCH_Control", {
-            "BENCH_Reset": reset, "BENCH_PowerOk": int(power_ok), "BENCH_TxOk": int(tx_ok), "BENCH_Release": int(release), "BENCH_Defects": mask}))
+            "BENCH_Reset": reset, "BENCH_PowerOk": int(power_ok), "BENCH_TxOk": int(tx_ok), "BENCH_Release": int(release),
+            "BENCH_Lockstep": int(self.lockstep), "BENCH_Defects": mask}))
 
     def prepare(self, warm_start: bool, defects: frozenset = frozenset()) -> None:
         self.defects = frozenset(defects)
         self.bus.recv_all()
         self._ctrl(1 if warm_start else 2, True, True, False)
         want = self.canio.STATES.index("NORMAL" if warm_start else "INIT")
-        self._send_fb(0, {"v": 0.0, "a": 0.0, "delta": 0.0, "yaw_rate": 0.0, "grade_accel": 0.0})
-        self._wait_for(lambda m: m.arbitration_id == self.canio.ID["status"] and m.data[0] == want, 5.0, "vECU did not reset")
+        if not self.lockstep:   # lockstep: the vECU acknowledges the reset itself; cycle 0 waits for step(0)'s inputs
+            self._send_fb(0, {"v": 0.0, "a": 0.0, "delta": 0.0, "yaw_rate": 0.0, "grade_accel": 0.0})
+        ack = self._wait_for(lambda m: m.arbitration_id == self.canio.ID["status"] and len(m.data) == 8 and m.data[2] & 0x07 == want,
+                             5.0, "vECU did not reset")
+        # real time: the reset's answer is cycle 0's status; lockstep: an acknowledgement before cycle 0 (counter 0)
+        self.cycle_seen, self.status_c = (-1 if self.lockstep else 0), ack.data[1]
         self.ctrl_state, self.last = (True, True, False), Outputs(state="NORMAL" if warm_start else "INIT")
+        self.status_rx = e2e.StatusReceiver()   # the vECU restarted its counter at the reset
+        self.replay_frame, self.n_replays_sent = None, 0
         self._observe_reset()   # black box: everything the oracle needs comes from status frames seen on CAN
 
     def _send_fb(self, t: int, fb: dict) -> None:
@@ -343,20 +385,79 @@ class CanDUT(BlackBoxObserver, DeviceUnderTest):
         self._send_fb(t, fb)
         act = []
         st, cause, ch, mrm, cmd = self.last.state, self.last.cause, self.last.challenge, self.last.mrm_request, self.last.out_cmd
-        for m in self.bus.recv_all():
+        msgs, self.checked = self.bus.recv_all(), {}
+        if self.lockstep and t % 10 == 0:
+            msgs = self._wait_cycle(t, msgs)
+        for m in msgs:
             if m.arbitration_id == cid["act"]:
                 act.append((m.arbitration_id, bytes(m.data)[:7]))
             elif m.arbitration_id == cid["status"]:
-                s = self.db.decode_message(m.arbitration_id, bytes(m.data), decode_choices=False)
-                st, cause = self.canio.STATES[int(s["SAF_State"])], self.canio.CAUSES[int(s["SAF_Cause"])]
+                data = bytes(m.data)
+                if not self._accept(m):
+                    continue   # corrupted, repeated or stale: not used
+                self.last_status = data
+                s = self.db.decode_message(m.arbitration_id, data, decode_choices=False)
+                si, ci = int(s["SAF_State"]), int(s["SAF_Cause"])
+                st = self.canio.STATES[si]
+                cause = self.canio.CAUSES[ci] if ci < len(self.canio.CAUSES) else f"CAUSE_{ci}"
                 ch, mrm = int(s["SAF_WdChallenge"]), ("PULL_OVER" if s["SAF_MrmRequest"] else None)
                 cmd = (s["SAF_AccelOut"], s["SAF_SteerOut"], False)
+        if self.status_replay:
+            if t == self.status_replay["capture_ms"]:
+                self.replay_frame = getattr(self, "last_status", None)
+            if self.replay_frame and t in self.status_replay["inject_ms"]:
+                self.inj.send(cid["status"], self.replay_frame)   # a stale copy, byte for byte, on the bus
+                self.n_replays_sent += 1
         self._observe(t, self.last.state, st, cause, release)
         self.last = Outputs(act, st, cause, ch, mrm, cmd)
         return self.last
+
+    def _count_cycle(self, data: bytes) -> None:
+        """Unwrap the 8-bit alive counter into the vECU's cycle number since the reset (cycle 0 = the reset's answer)."""
+        c = data[1]
+        if self.status_c is not None:
+            self.cycle_seen += (c - self.status_c) % 256
+        self.status_c = c
+
+    def _accept(self, m) -> bool:
+        """E2E check of one status frame, once per frame (the lockstep wait and the step loop may both look at it);
+        an accepted frame advances the cycle count."""
+        if id(m) not in self.checked:
+            data = bytes(m.data)
+            ok = not self.status_e2e or self.status_rx.check(data)
+            if ok:
+                self._count_cycle(data)
+            self.checked[id(m)] = ok
+        return self.checked[id(m)]
+
+    def _wait_cycle(self, t: int, msgs: list) -> list:
+        """Lockstep: collect messages until the status of cycle t // 10 has arrived. Only frames that pass the E2E
+        check count, so a replayed stale status can't release the wait. Returned in arrival order, handled as usual."""
+        want, t_end, i = t // 10, self.time.perf_counter() + self.LOCKSTEP_TIMEOUT_S, 0
+        while True:
+            for m in msgs[i:]:
+                if m.arbitration_id == self.canio.ID["status"]:
+                    self._accept(m)
+            i = len(msgs)
+            if self.cycle_seen >= want:
+                return msgs
+            if self.time.perf_counter() > t_end:
+                raise BenchFault(f"lockstep: no status for cycle {t} ms within {self.LOCKSTEP_TIMEOUT_S:g} s "
+                                 f"(last cycle seen {self.cycle_seen * 10} ms): vECU stalled or crashed?")
+            msgs += self.bus.recv_all(timeout=0.001)
+
+    @property
+    def n_status_crc(self) -> int:
+        return self.status_rx.n_crc
+
+    @property
+    def n_status_seq(self) -> int:
+        return self.status_rx.n_seq
 
     def close(self) -> None:
         if self.proc:
             self.proc.terminate()
             self.proc.wait(timeout=5)
         self.bus.shutdown()
+        if self.inj:
+            self.inj.shutdown()

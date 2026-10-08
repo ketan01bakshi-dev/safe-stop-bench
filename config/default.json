@@ -14,7 +14,16 @@
     "steer_rate_dps": 20.0,
     "steer_tau_s": 0.05,
     "max_steer_deg": 30.0,
-    "backup_decel": 2.0
+    "backup_decel": 2.0,
+    "model": "kinematic",
+    "dynamic": {
+      "_note": "Used when model = dynamic (run.py --plant dynamic). Illustrative: a mid-size vehicle, not a calibrated one.",
+      "mass_kg": 1500.0,
+      "payload_kg": 0.0,
+      "rot_inertia_factor": 0.04,
+      "crr": 0.015,
+      "cd_a_m2": 0.7
+    }
   },
   "buses": {
     "planner": {
@@ -31,6 +40,10 @@
   "ecu": {
     "timeout_ms": 100,
     "fallback_decel": 3.0
+  },
+  "dut_hw": {
+    "_note": "v2.9.7: a real reset of the ESP32-S3 safety controller (EN pin) gives its first SAF_Status after 185-187 ms (measured, 5 resets). DUTs that can't really reset emulate it as a power loss this long.",
+    "reset_boot_ms": 186
   },
   "safety": {
     "cmd_timeout_ms": 100,
@@ -56,7 +69,10 @@
     "mrm_jerk": 4.0,
     "brake_only_decel": 4.0,
     "emergency_jerk": 8.0,
-    "release_clear_ms": 500
+    "release_clear_ms": 500,
+    "e2e_max_delta": 2,
+    "e2e_max_err_valid": 2,
+    "e2e_explain_gaps": true
   },
   "frictions": {
     "dry": 0.8,

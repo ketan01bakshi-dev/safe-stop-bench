@@ -55,7 +55,7 @@ class SafeStopVecu(Fmi2Slave):
         self.SAF_AccelOut, self.SAF_SteerOut = 0.0, 0.0
         self.sc = None
 
-        P, I, O = Fmi2Causality.parameter, Fmi2Causality.input, Fmi2Causality.output
+        P, I, O = Fmi2Causality.parameter, Fmi2Causality.input, Fmi2Causality.output  # noqa: E741
         fixed, discrete = Fmi2Variability.fixed, Fmi2Variability.discrete   # FMI 2.0: Integer/Boolean can't be continuous
         self._reg(Boolean, "Bench_WarmStart", P, fixed)
         self._reg(Integer, "Bench_Defects", P, fixed)
@@ -88,7 +88,7 @@ class SafeStopVecu(Fmi2Slave):
     def exit_initialization_mode(self):
         if self.resources and self.resources not in sys.path:
             sys.path.insert(0, self.resources)
-        from vecu_core.safety import MUTANTS, SafetyController   # staged copy, never the bench's `ssb`
+        from vecu_core.safety import MUTANTS, SafetyController  # staged copy, never the bench's `ssb`
         with open(os.path.join(self.resources, "configs", f"{self.Bench_Config}.json"), encoding="utf-8") as f:
             cfg = json.load(f)
         names = list(MUTANTS)

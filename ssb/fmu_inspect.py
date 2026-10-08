@@ -12,8 +12,8 @@ types and units? (5) which bench names can be mapped, and which required ones ca
 from __future__ import annotations
 
 import argparse
-import re
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -110,16 +110,19 @@ path, ops = sys.argv[1], sys.argv[2].split()
 md = read_model_description(path, validate=False)
 u = extract(path)
 mk = lambda name: FMU2Slave(guid=md.guid, unzipDirectory=u, modelIdentifier=md.coSimulation.modelIdentifier, instanceName=name)
-f = mk("a"); t = 0.0; keep = []
+f = mk("a"); t = 0.0; keep = []; freed = False
 for op in ops:
-    if op == "inst": f.instantiate()
+    # FMPy's freeInstance() also unloads the DLL, so an instance after a free needs a fresh wrapper (reloads the DLL)
+    if op == "inst":
+        if freed: f = mk("a"); freed = False
+        f.instantiate()
     elif op == "inst2": g = mk("b"); g.instantiate(); keep.append(g)   # keep it alive
     elif op == "init": f.setupExperiment(startTime=0.0); f.enterInitializationMode(); f.exitInitializationMode(); t = 0.0
     elif op == "step":
         for _ in range(100): f.doStep(currentCommunicationPoint=t, communicationStepSize=0.001); t += 0.001
     elif op == "term": f.terminate()
     elif op == "reset": f.reset()
-    elif op == "free": f.freeInstance()
+    elif op == "free": f.freeInstance(); freed = True
 print("OK")
 '''
 

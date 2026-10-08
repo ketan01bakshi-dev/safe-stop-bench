@@ -21,8 +21,8 @@ from __future__ import annotations
 import struct
 import time
 
-from .dut import BlackBoxObserver, DeviceUnderTest, Outputs
-from .e2e import crc8_h2f
+from .dut import BenchFault, BlackBoxObserver, DeviceUnderTest, Outputs
+from .e2e import StatusReceiver, crc8_h2f
 from .native import STATES, cfg_array, core_identity, defects_mask
 
 SYNC = 0xA5
@@ -41,7 +41,7 @@ class Parser:
 
     def feed(self, data: bytes) -> list[tuple[str, bytes]]:
         self.buf += data
-        out = []
+        out: list[tuple[str, bytes]] = []
         while True:
             i = self.buf.find(SYNC)
             if i < 0:
@@ -80,6 +80,20 @@ class SerialLink:
     def write(self, data: bytes, now_ms: int) -> None:
         self.ser.write(data)
 
+    def reset_board(self) -> bool:
+        """Pulse EN through RTS (DTR held low = normal boot, not download mode). Found on hardware 2026-10-06: a run that
+        ends abruptly leaves the node 'active', and an active node sends no hello until it is reset."""
+        if self.url:
+            return False
+        import time
+        self.ser.dtr = False
+        self.ser.rts = True
+        time.sleep(0.1)
+        self.ser.rts = False
+        time.sleep(1.5)            # boot + MCP2515 init
+        self.ser.reset_input_buffer()
+        return True
+
     def poll(self, now_ms: int) -> None:
         pass
 
@@ -112,6 +126,7 @@ class Emulator:
         (root / "reports").mkdir(exist_ok=True)
         self.log = root / "reports" / "emulator.log"
         self.proc = subprocess.Popen(cmd, cwd=str(root), stdout=subprocess.PIPE, stderr=open(self.log, "w"), text=True)
+        assert self.proc.stdout is not None
         line = self.proc.stdout.readline()
         if "ready" not in line:
             raise RuntimeError(f"board emulator did not start: {line!r}")
@@ -127,6 +142,8 @@ class Emulator:
 class LinkDUT(BlackBoxObserver, DeviceUnderTest):
     """Drives a safety node over the link protocol. `link_b` = board B (or the loopback); `link_a` = board A (hil)."""
 
+    emulator: "Emulator | None" = None   # set by make() for --port-b EMU
+
     def __init__(self, cfg: dict, link_b, link_a=None, kick: str = "usb", fb_period_ms: int | None = None,
                  hello_timeout_s: float = 5.0, bus_monitor: bool | None = None):
         self.cfg, self.b, self.a = cfg, link_b, link_a
@@ -138,6 +155,7 @@ class LinkDUT(BlackBoxObserver, DeviceUnderTest):
         self.pb, self.pa = Parser(), Parser()
         self.defects: frozenset = frozenset()
         self.diag: dict = {}
+        self.diag_a: dict = {}
         self.fw_b = self.fw_a = "?"
         self.mode = "hil" if link_a else ("pil" if self.realtime else "loopback")
         self.name = f"{self.mode}: B={link_b.name}" + (f", A={link_a.name}" if link_a else "")
@@ -158,7 +176,16 @@ class LinkDUT(BlackBoxObserver, DeviceUnderTest):
                     self.fw_b = p.decode(errors="replace")
             return
         t_end, got_b, got_a = time.time() + timeout_s, False, self.a is None
-        while time.time() < t_end and not (got_b and got_a):
+        reset_tried = False
+        while not (got_b and got_a):
+            if time.time() >= t_end:
+                if reset_tried:
+                    break
+                reset_tried = True       # a stale 'active' node is silent: reset the silent board(s) once, then wait again
+                for got, link in ((got_b, self.b), (got_a, self.a)):
+                    if not got and link is not None and hasattr(link, "reset_board"):
+                        link.reset_board()
+                t_end = time.time() + timeout_s
             mb, ma = self._read()
             for k, p in mb:
                 if k == "H":
@@ -181,7 +208,7 @@ class LinkDUT(BlackBoxObserver, DeviceUnderTest):
         self.b.write(frame_msg("R", payload), 0)
         t_end, acked = time.time() + 3.0, False
         while not acked:   # the node acknowledges while parsing 'R'; no poll here, or cycle 0 would run early
-            for k, p in self._read()[0]:
+            for k, _p in self._read()[0]:
                 acked = acked or k == "A"
             if acked or not self.realtime:
                 break
@@ -190,13 +217,33 @@ class LinkDUT(BlackBoxObserver, DeviceUnderTest):
             time.sleep(0.001)
         if not acked:
             raise RuntimeError("node did not acknowledge the reset")
-        self.ctrl, self.kick_n = None, 0
+        self.ctrl: tuple[bool, bool, bool] | None = None
+        self.rts_release_t: int | None = None
+        self.resetting_since: int | None = None
+        self.n_inflight = 0
+        self.kick_n = 0
         self.last = Outputs(state="NORMAL" if warm_start else "INIT")
         self._observe_reset()
         self.n_status = self.n_act = 0
+        self.last_status_t = 0
+        self.a_reinits0 = self.diag_a.get("reinits", 0)
+        self.mirror: list[list] = []    # B's own USB copy of each SAF_Status it sent: [t, bytes, used]
+        self.n_replay = 0
+        self.status_rx = StatusReceiver()   # SAF_Status E2E receiver (v2.9.6; shared with the CAN-process bench, v2.10)
+        self.pend: list[tuple[int, bytes]] = []
+        self.act_c: int | None = None   # last Profile 2 counter seen on SAF_ActuatorCmd
+        self.cyc_ms = 0                 # B's cycle time, unwrapped from that counter (10 ms per count)
+        self.cyc: tuple | None = None
+
+    # Found on hardware 2026-10-06: when the CAN link to board A dropped mid-campaign, every later scenario "failed"
+    # with the DUT apparently stuck in NORMAL (48 false FAILs). The bench must call its own fault, not blame the DUT.
+    OBSERVER_TIMEOUT_MS = 500
 
     # ---- one millisecond -------------------------------------------------------------------------------------------
     def step(self, t, frames, kicks, fb, release, power_ok, tx_ok) -> Outputs:
+        if self.rts_release_t is not None and t >= self.rts_release_t:
+            self.b.ser.rts = False   # release EN: the board boots
+            self.rts_release_t = None
         out = b""
         if t % self.fb_period == 0 or release:
             out += frame_msg("F", struct.pack("<5d", fb["v"], fb["a"], fb["delta"], fb["yaw_rate"], fb.get("grade_accel", 0.0)))
@@ -226,14 +273,42 @@ class LinkDUT(BlackBoxObserver, DeviceUnderTest):
         for k, p in mb:
             if k == "M" and not self.a:
                 frames_in.append(p)
+            elif k == "M" and (p[0] | p[1] << 8) == 0x201:
+                self.mirror.append([t, bytes(p), False])
             elif k == "D" and len(p) >= 23:
                 c, ex, late, txf, ovf = struct.unpack("<5I", p[:20])
                 self.diag = {"cycles": c, "max_exec_us": ex, "max_late_ms": late, "can_tx_fail": txf, "rx_overflow": ovf,
                              "link_errors": p[20], "bus_fault": bool(p[21]), "kick_src": "gpio" if p[22] & 1 else "usb",
                              "bus_monitor": bool(p[22] & 2)}
+        self.mirror = [m for m in self.mirror if t - m[0] <= 50]
         for k, p in ma:
             if k == "M":
+                if (p[0] | p[1] << 8) == 0x201:
+                    self.pend.append((t, bytes(p)))
+                    continue
                 frames_in.append(p)
+            elif k == "D" and len(p) >= 12:
+                self.diag_a = {"rx": struct.unpack_from("<I", p)[0], "eflg": p[4], "rx_overflow": struct.unpack_from("<I", p, 5)[0],
+                               "bad_mode": p[9], "reinits": p[10] | p[11] << 8,
+                               "spi_glitches": p[12] | p[13] << 8 if len(p) >= 14 else None}
+                if len(p) >= 31:   # BusNode 2.6: the RAM queue between the CAN task and USB
+                    self.diag_a["queue_high"] = p[25] | p[26] << 8
+                    self.diag_a["queue_drops"] = struct.unpack_from("<I", p, 27)[0]
+        # SAF_Status in arrival order: used once B's USB copy vouches for it; one with no copy within 20 ms of its arrival
+        # is a replay. Usually the copy is already here (0-2 ms ahead); if B's port is read late, the frame waits.
+        while self.pend:
+            t_bus, q = self.pend[0]
+            if self._sent_by_b(t_bus, q):
+                frames_in.append(q)
+            elif t - t_bus > 20:
+                self.n_replay += 1
+            else:
+                break
+            self.pend.pop(0)
+        if self.diag_a.get("reinits", 0) != self.a_reinits0:
+            self.a_reinits0 = self.diag_a["reinits"]
+            raise BenchFault(f"observer fault at {t} ms: board A's MCP2515 left normal mode (CANSTAT mode "
+                             f"{self.diag_a['bad_mode']}) and was re-initialised; B's frames went unacknowledged meanwhile")
         act, st, cause, ch, mrm, cmd = [], self.last.state, self.last.cause, self.last.challenge, self.last.mrm_request, self.last.out_cmd
         from .canio import CAUSES
         for p in frames_in:
@@ -242,16 +317,104 @@ class LinkDUT(BlackBoxObserver, DeviceUnderTest):
             if cid == 0x200:
                 act.append((cid, data))
                 self.n_act += 1
+                if n == 7:
+                    # B's own time base: the Profile 2 counter advances once per 10 ms cycle (mod 16, so up to
+                    # 15 lost frames unwrap correctly). Found on hardware: sampling B's steering on the PC's clock
+                    # turned 1 ms of USB arrival jitter into a false 72 deg/s slew (v2.9 finding 5).
+                    c = data[1] & 0x0F
+                    d = 1 if self.act_c is None else (c - self.act_c) % 16
+                    if d:   # d == 0: a repeated frame, not a new cycle
+                        self.cyc_ms += 10 * d
+                        self.act_c = c
+                        self.cyc = (self.cyc_ms, struct.unpack_from("<h", data, 4)[0] / 100)
             elif cid == 0x201 and n == 8:
-                s_i, c_i, ch, m_i, a_raw, s_raw = struct.unpack("<BBBBhh", data)
+                if self.resetting_since is not None and t - self.resetting_since < self.MIN_BOOT_MS:
+                    self.n_inflight += 1   # sent before the reset, still in flight: the board can't be back yet
+                    continue
+                if not self._status_e2e_ok(data):
+                    continue
+                _crc, _ctr, packed, ch, a_raw, s_raw = struct.unpack("<BBBBhh", data)
+                s_i, m_i, c_i = packed & 0x07, (packed >> 3) & 1, packed >> 4
                 st = STATES[s_i] if s_i < len(STATES) else f"UNKNOWN_{s_i}"
                 cause = CAUSES[c_i] if c_i < len(CAUSES) else f"CAUSE_{c_i}"
                 mrm = "PULL_OVER" if m_i else None
                 cmd = (a_raw / 100, s_raw / 100, False)
                 self.n_status += 1
+                self.last_status_t = t
+                if self.resetting_since is not None:
+                    self.events_hw = getattr(self, "events_hw", [])
+                    self.events_hw.append((self.resetting_since, t))
+                    self.resetting_since = None   # back from the reset: its first status
+        if self.resetting_since is not None:
+            st = "OFF"   # booting after the bench's reset: nothing on the bus yet
+        if power_ok and self.resetting_since is None and t - self.last_status_t > self.OBSERVER_TIMEOUT_MS:
+            src = "board A (CAN bus)" if self.a else "board B (USB mirror)"
+            raise BenchFault(f"observer lost at {t} ms: no SAF_Status from {src} for {t - self.last_status_t} ms. "
+                               f"Bench fault, not a DUT verdict: check the CAN link (J2 H/L/GND, termination) and A's "
+                               f"MCP2515. Board B diagnostics: {self.diag}; board A: {self.diag_a}")
         self._observe(t, self.last.state, st, cause, release)
-        self.last = Outputs(act, st, cause, ch, mrm, cmd)
+        self.last = Outputs(act, st, cause, ch, mrm, cmd, self.cyc)
         return self.last
+
+    # Found on hardware (v2.9.3, cause found in v2.9.4): now and then an old SAF_Status, byte-identical to one from
+    # seconds or hours earlier, reached the bench. SAF_Status has no alive counter, so a 1 ms "STOP -> NORMAL" blip
+    # looked like the DUT leaving a latched stop. The source was board A: its MCP2515 misread a flag as "RXB1 full"
+    # and the library re-read a stale RXB1 (fixed in BusNode 2.5). Kept as defence in depth: a bus frame counts only if
+    # B's own USB copy shows it sent exactly those bytes in the last 20 ms (the copy usually arrives 0-2 ms before the bus one),
+    # each copy vouching for one bus frame. Anything else is counted as a replay and not used. v2.9.4: the copy may
+    # also arrive after the bus frame (B's port read late for a while: 40 genuine frames were rejected in one run), so
+    # an unvouched frame waits up to 20 ms, in order, before it is called a replay.
+    def _sent_by_b(self, t: int, p: bytes) -> bool:
+        if not self.mirror:
+            return True   # no USB copies (older firmware or a stalled link): cannot tell, so do not filter
+        for m in self.mirror:
+            if not m[2] and m[1] == p and abs(t - m[0]) <= 20:
+                m[2] = True
+                return True
+        return False
+
+    # SAF_Status E2E (v2.9.6): CRC-8 over bytes 1-7 + data ID 0x201, then an 8-bit alive counter (see e2e.StatusReceiver,
+    # the same receiver the CAN-process bench uses since v2.10).
+    def _status_e2e_ok(self, data: bytes) -> bool:
+        return self.status_rx.check(data)
+
+    @property
+    def n_status_crc(self) -> int:
+        return self.status_rx.n_crc
+
+    @property
+    def n_status_seq(self) -> int:
+        return self.status_rx.n_seq
+
+    # ---- real reset (v2.9.7) -------------------------------------------------------------------------------------
+    # EN through RTS on the CH340 (DTR held low, or the ESP32 would start its bootloader). Non-blocking: RTS goes high
+    # now and low 2 ms later inside step(). While the board boots it sends nothing at all, so the observer reports
+    # OFF (the bench applied the reset, it knows) and the observer-loss guard waits for it, up to BOOT_TIMEOUT_MS.
+    # A board that does not come back stays OFF: that is a DUT verdict (no latched stop), not a bench fault.
+    BOOT_TIMEOUT_MS = 3000
+    MIN_BOOT_MS = 50   # measured boot 185-187 ms; a status within 50 ms of the reset pulse was sent before it
+
+    @property
+    def can_hw_reset(self) -> bool:
+        return isinstance(self.b, SerialLink) and not self.b.url
+
+    def hw_reset(self, t: int) -> None:
+        ser = self.b.ser
+        ser.dtr = False
+        ser.rts = True
+        self.rts_release_t = t + 2
+        self.resetting_since = t
+        self.status_rx.reset()   # the board's alive counter restarts
+        self.n_hw_resets = getattr(self, "n_hw_resets", 0) + 1
+
+    def recover(self) -> None:
+        """After a bench fault: reset both boards (EN via RTS) and wait for their hellos."""
+        for link in (self.b, self.a):
+            if link is not None and hasattr(link, "reset_board"):
+                link.reset_board()
+        self.pb, self.pa = Parser(), Parser()
+        self.diag_a = {}
+        self._wait_hello(5.0)
 
     def identity(self) -> str:
         fw = f"fw B '{self.fw_b}'" + (f", fw A '{self.fw_a}'" if self.a else "")
@@ -261,7 +424,7 @@ class LinkDUT(BlackBoxObserver, DeviceUnderTest):
         for link in (self.b, self.a):
             if link:
                 link.close()
-        if getattr(self, "emulator", None):
+        if self.emulator:
             self.emulator.close()
 
 

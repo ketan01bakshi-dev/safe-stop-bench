@@ -6,7 +6,7 @@ import json
 
 from .config import ROOT
 
-DEFAULTS = {"start_kmh": 30, "duration_ms": 8000, "inject_ms": 2000}
+DEFAULTS: dict = {"start_kmh": 30, "duration_ms": 8000, "inject_ms": 2000}
 
 
 def _defaults(sc: dict) -> dict:

@@ -67,7 +67,8 @@ def verdict(r: dict, sc: dict, reqs: dict, cfg: dict) -> dict:
         checks.append((f"stayed in lane (|y| ≤ {max_lat:.2f} m)", r["max_lateral_m"] <= max_lat))
     checks.append(("no invariant violations", r["invariant_count"] == 0))
     if r.get("bench_lag_ms") is not None:   # real-time DUTs only: the bench itself must keep up
-        checks.append((f"bench kept real time (max lag {r['bench_lag_ms']} ms <= 5 ms)", r["bench_lag_ms"] <= 5.0))
+        from .runner import LAG_LIMIT_MS
+        checks.append((f"bench kept real time (max lag {r['bench_lag_ms']} ms <= {LAG_LIMIT_MS:g} ms)", r["bench_lag_ms"] <= LAG_LIMIT_MS))
     passed = all(ok for _, ok in checks)
     known = cfg.get("known_findings", {}).get(sc["key"])
     status = "PASS" if passed else ("KNOWN" if known else "FAIL")

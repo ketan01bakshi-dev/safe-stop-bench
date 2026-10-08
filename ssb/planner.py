@@ -58,7 +58,7 @@ class Planner:
                 self.log = [{k: float(v) for k, v in row.items()} for row in csv.DictReader(fh)]
 
     def f(self, kind: str, t: int):
-        for i, f in enumerate(self.faults):
+        for f in self.faults:
             if f["type"] == kind and active(f, t):
                 return f
         return None

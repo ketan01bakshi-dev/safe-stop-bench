@@ -45,8 +45,12 @@ class SafetyController:
         self.cfg, self.p, self.defects = cfg, dict(cfg["safety"]), set(defects)
         if "long_timeout" in self.defects:
             self.p["cmd_timeout_ms"] = 1000
-        self.rx = e2e.Profile5.Receiver(data_id, max_delta=2)
-        sm_kw = {"max_err_valid": 6} if "e2e_lenient" in self.defects else {}
+        # E2E tuning (v2.6): optional keys, defaults = the v2.0 behaviour and the C++ core's constants
+        p = self.p
+        self.rx = e2e.Profile5.Receiver(data_id, max_delta=p.get("e2e_max_delta", 2), explain_gaps=p.get("e2e_explain_gaps", False))
+        sm_kw = {"window": p.get("e2e_window", 6), "max_err_valid": p.get("e2e_max_err_valid", 2)}
+        if "e2e_lenient" in self.defects:
+            sm_kw["max_err_valid"] = 6
         self.sm = e2e.E2EStateMachine(**sm_kw)
         self.bad_run = 0
         self.state = "NORMAL" if warm_start else "INIT"
@@ -118,7 +122,7 @@ class SafetyController:
     def release(self, t: int, v: float) -> bool:
         ok_conditions = v == 0.0 and t - self.fault_active_t >= self.p["release_clear_ms"]
         if self.state in LATCHED and ("release_unconditional" in self.defects or ok_conditions):
-            self._log(t, f"release accepted → INIT")
+            self._log(t, "release accepted → INIT")
             self.state, self.valid_since_init, self.mrm_request, self.decel_now = "INIT", 0, None, 0.0
             return True
         self.release_rejected += 1
@@ -132,7 +136,7 @@ class SafetyController:
         elif not on and not self.powered:
             self.powered = True
             keep = (self.events, self.dtcs, self.release_rejected)
-            self.__init__(self.cfg, frozenset(self.defects), warm_start=False)
+            self.__init__(self.cfg, frozenset(self.defects), warm_start=False)  # type: ignore[misc]  # reset in place, as a power cycle
             self.events, self.dtcs, self.release_rejected = keep
             self.last_kick, self.last_valid_ms = t, t
             self._escalate(t, "STOP_IN_LANE", "SAFETY_RESET")
@@ -160,6 +164,7 @@ class SafetyController:
                 self._escalate(t, "STOP_IN_LANE", "E2E_INVALID")
             if status not in e2e.VALID or sm_state not in ("VALID", "INIT"):
                 continue
+            assert payload is not None   # VALID status always carries the payload
             c = decode_cmd(payload)
             age = (t - c["t_stamp"]) % 65536
             if "no_freshness" not in self.defects and age > p["max_age_ms"]:

@@ -12,7 +12,6 @@ which looks exactly like a slow MCU. A process has its own interpreter, like a r
 from __future__ import annotations
 
 import argparse
-import selectors
 import socket
 import time
 
@@ -23,7 +22,6 @@ from .native import LoopbackLink
 def serve(port_b: int, port_a: int | None) -> None:
     from .rt import boost
     boost()
-    sel = selectors.DefaultSelector()
     listeners = {}
     for role, port in (("b", port_b), ("a", port_a)):
         if port:

@@ -21,9 +21,9 @@ cfg = config.load("config/default.json")
 only = sys.argv[1:] or list(MUTANTS)          # optional subset, to split the run over several processes
 rows, t0 = [], time.time()
 for m in only:
-    ref = campaigns.matrix(cfg, lambda sc: ReferenceDUT(cfg, frozenset([m]), warm_start=sc.get("start_kmh", 30) > 0), keep_trace=False)
+    ref = campaigns.matrix(cfg, lambda sc, m=m: ReferenceDUT(cfg, frozenset([m]), warm_start=sc.get("start_kmh", 30) > 0), keep_trace=False)
     nat_dut = NativeDUT(cfg, frozenset([m]))
-    nat = campaigns.matrix(cfg, lambda sc: nat_dut, keep_trace=False)
+    nat = campaigns.matrix(cfg, lambda sc, d=nat_dut: d, keep_trace=False)
     nat_dut.close()
     fr = sorted(r["key"] for r in ref if r["verdict"]["status"] == "FAIL")
     fn = sorted(r["key"] for r in nat if r["verdict"]["status"] == "FAIL")

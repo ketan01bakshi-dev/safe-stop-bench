@@ -108,7 +108,7 @@ The back-to-back run against our reference is the fastest way to find **where th
 | Reference FMU, **exact** back-to-back vs in-process reference | **52/52 identical**: every state change to the millisecond, plus the vehicle's end speed and lateral position |
 | Bug seeded **inside** the FMU (`--defect no_latch`) | 18 scenarios fail, the **same 18** as the same bug in-process |
 | Supplier-style FMU (other names, km/h, other state codes, no hooks), driven only through `mapping_supplier_style.json` | Intake: valid; 31 of 31 proposed matches correct; 1 optional signal mapped by hand. Matrix: **49/52 + 1 known**, 2 FAIL = the cold-start gap (finding 5 below); back-to-back 50/52, the same 2 |
-| Intake lifecycle (5 repeats each, child processes) | Run ✅, reset ✅; reference two-instance ✅, supplier-style two-instance ❌ 3–8 in 10 (finding 3); free→re-instantiate ❌ always (finding 2) |
+| Intake lifecycle (5 repeats each, child processes) | Run ✅, reset ✅; reference two-instance ✅, supplier-style two-instance ❌ 3–8 in 10 (finding 3); free→re-instantiate ❌ always (finding 2; **corrected in v2.4**, see §8) |
 | Unit tests | 18 pass (5 new FMU tests: exact b2b on 12 scenarios incl. both same-millisecond cases, seeded bug caught, mapping errors listed, supplier FMU via mapping, mapping proposal); FMU tests skip cleanly without FMPy |
 | Regression | In-process default and off-road: 51/52 + 1 known each; CAN adapter (refactored onto the shared observer) re-checked on 2 scenarios ✅ |
 
@@ -119,10 +119,35 @@ Reports: `reports/report_fmu.html`, `reports/supplier_style/report_fmu.html`, `r
 Each one is a problem a supplier FMU can have too. Every one is now caught by the intake tool, the adapter, or the oracle.
 
 1. **The export tool's defaults broke the FMI rules, twice.** PythonFMU 0.7.0 gave Integer and Boolean variables `variability="continuous"` (forbidden), and left `ModelStructure/InitialUnknowns` empty although the outputs are "calculated" (also forbidden). The adapter's schema check let the second one through; only FMPy's full rule check (`validate_fmu`, run by the intake tool) caught it. Fix: discrete variability, outputs `initial="exact"` with a start value. *Lesson: run the full validator, not just schema parsing. Some importers accept these silently and some refuse them, so the same FMU "works" in one tool and not another.*
-2. **Free → instantiate again in one process is an access violation** (in `fmi2Instantiate`); the whole bench process dies, and Python can't catch it. `fmi2Reset` works. Fix: one instance per campaign, `fmi2Reset` between scenarios. *Lesson: test the lifecycle on intake, in child processes.*
+2. ~~**Free → instantiate again in one process is an access violation**~~ **Corrected in v2.4: this was the bench's own test.** FMPy's `freeInstance()` also unloads the DLL, and the test re-used the unloaded wrapper. With a fresh wrapper, the reference FMU re-instantiates fine (§8). The adapter still uses one instance per campaign with `fmi2Reset` between scenarios (cheaper anyway). *Lesson kept: test the lifecycle on intake, in child processes. New lesson: prove the harness before blaming the binary.*
 3. **An intermittent crash: two live instances of the supplier-style FMU crashed 8 runs in 10** (Python thread-state fault in the embedded interpreter); the reference FMU, 0 in 10. My first single-shot lifecycle check missed it. Fix: the lifecycle check repeats every sequence (default 5×) and reports the crash rate. Only the sequences the bench actually needs (run, reset) block a campaign; the others are warnings with the reason they matter (parallel runs, no-reset fallback).
 4. **Name matching on its own is dangerous.** The first proposer (plain string similarity) **swapped `PLN_AccelReq` and `PLN_SpeedReq`** (`PlnCmd_VReq` vs `PlnCmd_AxReq`) and found only 16 of 31 signals. A swapped acceleration/speed pair would have produced nonsense results that look like controller bugs. Fix: an automotive abbreviation dictionary (Ctr/Cnt/Alive → counter, Ax → accel, Wdg → watchdog, Qly → health…), owner prefixes ignored, best-score-first assignment. Now 31 of 31 proposals are correct, every one is still marked CHECK, a km/h speed is flagged with factor 3.6, and the one signal no name can reveal (`Bench_TxOk` → `Can_ActBusOk`) is listed as UNMAPPED for a human.
 5. **The oracle had a blind spot that only back-to-back exposed.** The supplier-style FMU has no start-mode hook, so it began cold-start scenarios in NORMAL instead of INIT. The matrix still said PASS: the vehicle behaved safely, and nothing checked the start state. The exact back-to-back flagged both scenarios. Fix: a new oracle check, "cold start begins in INIT" (SR-06). The supplier-style run now fails them, exit 1. *Lesson: pass/fail checks only what someone thought of; back-to-back against a reference finds what nobody wrote a check for.*
 6. **Two planner frames can arrive in the same millisecond.** A plain "new data" flag would silently drop one, and the E2E counter check would then report a lost frame: a false finding. Fix: Rx counters and a one-deep receive queue in the adapter.
 7. **Raw vs physical signals decide whether E2E is testable at all.** With physical-only signals the CRC is lost. Ask the supplier for raw COM-level signals (or FMI 3.0 binary) if E2E is in their scope.
 
+## 8. v2.4: a compiled C FMU (what a supplier actually ships)
+
+`fmu/SafeStopVecuC.fmu`, built by `scripts/build_c_fmu.py`: the C++ core from the HiL work (`hil/SafeStopCore`, unchanged) behind a hand-written FMI 2.0 co-simulation API (`fmu/c_src/SafeStopVecuC.cpp`, ~250 lines). `binaries/win64` DLL + `modelDescription.xml`, no Python inside.
+
+```
+.venv\Scripts\python.exe scripts/build_c_fmu.py
+.venv\Scripts\python.exe -m ssb.fmu_inspect fmu/SafeStopVecuC.fmu --lifecycle
+.venv\Scripts\python.exe run.py --dut fmu --file fmu/SafeStopVecuC.fmu --b2b-dut      # exact vs the Python reference
+```
+
+| Check | Result (5 Oct 2026) |
+|---|---|
+| FMI 2.0 validation (FMPy, full rules) | clean |
+| Intake lifecycle, 5 repeats, child processes | run ✅ · reset ✅ · two instances ✅ · free → re-instantiate ✅ |
+| Full matrix, 52 scenarios | 51/52 + 1 known finding (same as every DUT) |
+| **Exact back-to-back vs in-process Python reference** | **52/52 identical** |
+| Off-road calibration via `Bench_Config` | exact on the tested scenarios |
+| Seeded bug `no_latch` via `Bench_Defects` | caught |
+| Speed through FMPy (20 000 × 1 ms steps) | 3.7 µs/step vs 12.9 µs for the PythonFMU |
+
+**Design choices:** one generator table → header + XML (they can't drift); GUID = content hash (a changed core gives a new GUID, so a stale XML/binary pair is refused); no allocation in `fmi2DoStep`; any step size, split into 1 ms sub-steps; unsupported optional functions return `fmi2Error` and the capability flags say so.
+
+**Correction to finding 2 (§6):** see `docs/CHANGES_V2.md` v2.4, finding 1.
+
+**Honest limits:** win64 binary only (no Linux `.so` in the zip yet); FMI 2.0, not 3.0; the "supplier" is still my own core, so back-to-back proves the packaging and the port, not an independent implementation.

@@ -1,8 +1,11 @@
 """Smoke test: run a few scenarios through the separate-process vECU over CAN and compare with in-process."""
-import sys, time
+import sys
+import time
+
 sys.path.insert(0, ".")
 from ssb import campaigns, config, oracle, runner
 from ssb.dut import CanDUT
+
 cfg = config.load(); reqs = campaigns.requirements()["requirements"]
 keys = sys.argv[1:] or ["command_link_lost", "planner_hang", "single_bad_frame"]
 dut = CanDUT()

@@ -37,7 +37,7 @@ def lib():
         if not DLL.exists():
             raise RuntimeError(f"{DLL} not built: run scripts/build_native.py (needs: pip install ziglang)")
         L = ctypes.CDLL(str(DLL))
-        P, I64, D, U8P, I = ctypes.c_void_p, ctypes.c_int64, ctypes.c_double, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int
+        P, I64, D, U8P, I = ctypes.c_void_p, ctypes.c_int64, ctypes.c_double, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int  # noqa: E741
         sig = {"ssc_ctrl_new": ([], P), "ssc_ctrl_free": ([P], None),
                "ssc_ctrl_init": ([P, ctypes.POINTER(D), ctypes.c_uint32, I], None), "ssc_ctrl_kick": ([P, I64], None),
                "ssc_ctrl_release": ([P, I64, D], I), "ssc_ctrl_brownout": ([P, I64, I], None),

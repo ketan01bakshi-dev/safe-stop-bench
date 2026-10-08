@@ -63,8 +63,11 @@ class Controller {
   void brownout(int64_t t, bool on);
   // One 10 ms cycle. Writes the Profile 2 SAF_ActuatorCmd frame (7 bytes) to act and returns 7, or 0 if unpowered.
   int cycle(int64_t t, const Frame *frames, int n, const Feedback &fb, uint8_t act[7]);
-  // SAF_Status as in dbc/safe_stop.dbc (8 bytes): state, cause, challenge, MRM request, accel out, steer out.
-  void status_frame(uint8_t out[8]) const;
+  // SAF_Status, E2E-protected since v2.9.6 (8 bytes): CRC-8 | alive counter | state:3 mrm:1 cause:4 | challenge |
+  // accel out (int16, 0.01) | steer out (int16, 0.01). The CRC (CRC-8 0x2F, as Profile 2) covers bytes 1-7 plus the
+  // data ID 0x201 (LE). Found on hardware: without a counter a stale copy of an old status could not be rejected.
+  // Since v2.10 the DBC (dbc/safe_stop.dbc) and the CAN-process vECU use this layout too (ssb/e2e.py status_protect).
+  void status_frame(uint8_t out[8]);
 
   // observable state (what ReferenceDUT reads from the Python controller)
   State state;
@@ -96,6 +99,7 @@ class Controller {
   // E2E Profile 5 receiver + windowed state machine (window 6)
   bool rx_has_last_;
   uint8_t rx_last_;
+  int crc_fails_;  // CRC failures since the last frame that passed the CRC (explained gaps, v2.6)
   uint8_t win_[6];
   int win_n_, win_head_;
   SmState sm_;
@@ -124,6 +128,7 @@ class Controller {
   double decel_now_;
   double out_prev_steer_;
   uint8_t act_counter_;
+  uint8_t status_counter_;
   int64_t fault_active_t_;
   double psi_mrm_;
 };
@@ -165,6 +170,13 @@ class Node {
   void poll(int64_t now_ms);
   void gpio_kicks(int n, int64_t now_ms);  // edges seen on the hardware watchdog line
   void set_bus_fault(bool f) { bus_fault_ = f; }
+  // v2.9.7, real reset: the last accepted reset message ('R'), so a board can keep its configuration across a real
+  // reset (a real ECU keeps its calibration in flash). config_seq() changes whenever a new one is accepted.
+  const uint8_t *config_blob(uint8_t *n) const { *n = n_blob_; return blob_; }
+  uint32_t config_seq() const { return config_seq_; }
+  // Boot path: start from a stored configuration, cold, in the latched safe state (STOP_IN_LANE, SAFETY_RESET), on
+  // the board's own clock. Returns false if the blob is not a valid configuration.
+  bool restore(const uint8_t *blob, uint8_t n, int64_t now_ms);
   bool active() const { return active_; }
   uint8_t kick_source() const { return kick_src_; }
   bool bus_monitor() const { return bus_monitor_; }
@@ -172,6 +184,7 @@ class Node {
 
  private:
   void handle(int64_t now_ms);
+  bool start(const uint8_t *p, uint8_t n, int64_t now_ms);
   void send(uint8_t type, const uint8_t *p, uint8_t n);
   void emit_can(uint16_t id, const uint8_t *d, uint8_t n);
   NodeIo io_;
@@ -186,6 +199,9 @@ class Node {
   uint32_t max_exec_us_;
   int64_t max_late_ms_;
   Feedback fb_;
+  uint8_t blob_[7 + 8 * N_CONFIG];
+  uint8_t n_blob_;
+  uint32_t config_seq_;
 };
 
 }  // namespace ssc

@@ -1,8 +1,8 @@
 """Campaigns on top of single runs: matrix, sweeps, false-stop rate, fuzzing, mutation score, back-to-back, gaps."""
 from __future__ import annotations
 
+import copy
 import json
-import math
 import random
 
 from . import oracle, runner, scenarios
@@ -57,6 +57,35 @@ def sweep(cfg: dict) -> list[dict]:
     return rows
 
 
+LOAD_KEYS = ("command_link_lost", "brake_weak")
+
+
+def load_sweep(cfg: dict, payloads=(0, 300, 600, 700, 800, 900, 1500), grades=(0.0, -6.0), duration_ms: int = 15000) -> list[dict]:
+    """v2.5, dynamic plant only: payload x grade for a planned stop (MRM, link lost) and a weak brake.
+    Shows what the kinematic model can't: the same brake request gives less deceleration with load, and the
+    brake-plausibility check (achieved < 50% of demand for 400 ms) reacts to load + actuator lag together.
+    15 s runs: a loaded stop downhill takes longer than the matrix's 8 s window."""
+    if cfg["plant"].get("model") != "dynamic":
+        raise ValueError("load_sweep needs the dynamic plant (run.py --plant dynamic)")
+    reqs = requirements()["requirements"]
+    by_key = {s["key"]: s for s in scenarios.load()}
+    rows = []
+    for key in LOAD_KEYS:
+        for g in grades:
+            for kg in payloads:
+                sc = copy.deepcopy(by_key[key])
+                sc["key"], sc["payload_kg"], sc["grade_pct"] = f"{key}@{kg}kg/{g:+.0f}%", kg, g
+                sc["duration_ms"] = max(sc.get("duration_ms", 8000), duration_ms)
+                r = runner.run(sc, cfg, keep_trace=True)
+                v = oracle.verdict(r, sc, reqs, cfg)
+                rows.append({"key": sc["key"], "base": key, "payload_kg": kg, "grade_pct": g,
+                             "mass_ratio": round(cfg["plant"]["dynamic"]["mass_kg"] / (cfg["plant"]["dynamic"]["mass_kg"] + kg), 2),
+                             "peak_state": v["peak_state"], "cause": r["cause"], "t_detect_ms": v["t_detect_ms"],
+                             "t_stop_ms": v["t_stop_ms"], "stop_dist_m": v["stop_dist_m"], "v_end_kmh": r["v_end_kmh"],
+                             "passed": v["passed"], "failed": [c for c, ok in v["checks"] if not ok]})
+    return rows
+
+
 def false_stop_rate(cfg: dict, seeds: int = 10, seconds: int = 60, noise: float = 0.005, jitter_ms: int = 10) -> dict:
     stops, km, details = 0, 0.0, []
     for seed in range(seeds):
@@ -86,10 +115,11 @@ def fuzz(cfg: dict, runs: int = 30, seed: int = 1) -> dict:
         for _ in range(rng.randint(1, 3)):
             ty = rng.choice(FUZZ_TYPES)
             start = rng.randint(500, 5000)
-            f = {"type": ty, "start": start, "end": start + rng.randint(20, 3000)}
-            f.update({"steer_rate": {"dps": rng.uniform(5, 120)}, "speed_req": {"kmh": rng.uniform(20, 70)},
+            f: dict[str, object] = {"type": ty, "start": start, "end": start + rng.randint(20, 3000)}
+            params: dict[str, dict[str, object]] = {"steer_rate": {"dps": rng.uniform(5, 120)}, "speed_req": {"kmh": rng.uniform(20, 70)},
                       "accel_req": {"accel": rng.uniform(-8, 5)}, "stale_timestamp": {"age_ms": rng.randint(20, 300)},
-                      "brake_weak": {"factor": rng.uniform(0.1, 0.9)}, "perception": {"health": rng.choice([0, 1])}}.get(ty, {}))
+                      "brake_weak": {"factor": rng.uniform(0.1, 0.9)}, "perception": {"health": rng.choice([0, 1])}}
+            f.update(params.get(ty, {}))
             faults.append(f)
         sc = scenarios._defaults({"key": f"fuzz_{i}", "inject_ms": None, "start_kmh": rng.choice([10, 20, 30, 40]),
                                   "duration_ms": 8000, "faults": faults})
@@ -116,7 +146,7 @@ def mutation(cfg: dict) -> dict:
                 killer = sc["key"]
                 break
         rows.append({"mutant": name, "description": desc, "killed": killer is not None, "killed_by": killer})
-    killed = sum(r["killed"] for r in rows)
+    killed = sum(bool(r["killed"]) for r in rows)
     return {"mutants": rows, "killed": killed, "total": len(rows), "score": round(100 * killed / len(rows), 1)}
 
 
@@ -164,7 +194,7 @@ def back_to_back(cfg: dict, other_factory, tol_ms: int = 20, only=None, exact: b
             diffs.append(f"detect {va['t_detect_ms']} vs {vb['t_detect_ms']} ms")
         qa = [(-(-t // quantum_ms) * quantum_ms, s) for t, s in ra["states"]]
         if exact and qa != [tuple(x) for x in rb["states"]]:
-            first = next((f"{x} vs {tuple(y)}" for x, y in zip(qa, rb["states"]) if x != tuple(y)),
+            first = next((f"{x} vs {tuple(y)}" for x, y in zip(qa, rb["states"], strict=False) if x != tuple(y)),
                          f"{len(qa)} vs {len(rb['states'])} state changes")
             diffs.append(f"timeline differs: {first}")
         if exact and (ra["v_end_kmh"], ra["max_lateral_m"]) != (rb["v_end_kmh"], rb["max_lateral_m"]):

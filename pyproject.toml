@@ -1,6 +1,6 @@
 [project]
 name = "safe-stop-bench"
-version = "2.3.0"
+version = "2.11"
 description = "SiL bench for an autonomous vehicle's safety layer: E2E, watchdogs, envelope, actuator checks, latched minimal risk manoeuvres"
 requires-python = ">=3.10"
 dependencies = []
@@ -10,9 +10,23 @@ fmu = ["fmpy", "pythonfmu", "cantools"]   # FmuDUT adapter + building the refere
 can = ["python-can", "cantools", "msgpack"] # CanDUT adapter (tested, v2.1)
 hil = ["pyserial", "ziglang"]               # ESP32-S3 PiL/HiL link + building the C++ core for the PC (v2.3)
 dev = ["ruff", "mypy"]
+mdf = ["asammdf"]                             # MDF4 traces, run.py --mdf (v2.7; on Python 3.14 see ssb/mdf_export.py)
 
 [tool.ruff]
 line-length = 140
+
+[tool.ruff.lint]
+# pyflakes + pycodestyle errors, import order, bugbear (likely bugs). Run: python -m ruff check .
+select = ["E4", "E7", "E9", "F", "W", "I", "B"]
+# deliberate compact style: one-line DUT-factory lambdas, "print(...); x = ..." progress lines
+ignore = ["E701", "E702", "E731"]
+
+[tool.mypy]
+# Run: python -m mypy ssb   (optional third-party packages have no type stubs)
+python_version = "3.10"
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true
 
 [tool.setuptools]
 packages = ["ssb"]

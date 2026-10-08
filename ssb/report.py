@@ -89,8 +89,11 @@ def _html(results, ex, meta, prev) -> str:
         failed = [c for c, good in v["checks"] if not good]
         verdict = {"PASS": '<span class="pass">PASS</span>', "KNOWN": '<span class="warn">KNOWN FINDING</span>'}.get(v.get("status"), '<span class="fail">FAIL</span>')
         note = ("<br><small>failed: " + html.escape(", ".join(failed)) + "</small>") if failed else ""
+        if r.get("bench_faults"):
+            note += (f'<br><small class="warn">bench rerun ×{len(r["bench_faults"])}: '
+                     + html.escape("; ".join(r["bench_faults"])) + "</small>")
         if v.get("known"):
-            note += f'<br><small class="warn">{html.escape(v["known"])}</small>' 
+            note += f'<br><small class="warn">{html.escape(v["known"])}</small>'
         finding = f'<br><span class="warn">FINDING</span> <small>{html.escape(r["finding"])}</small>' if r.get("finding") else ""
         tl = "".join(f"<li>{t} ms: {html.escape(txt)}</li>" for t, txt in r["events"][:12])
         rows.append(
@@ -103,7 +106,7 @@ def _html(results, ex, meta, prev) -> str:
             f"<td>{r['max_lateral_m']} m<br><small>jerk {r['max_jerk']}</small></td><td>{verdict}{note}</td></tr>")
 
     # traceability
-    by_req = {}
+    by_req: dict[str, list] = {}
     for r in results:
         for q in r["req"]:
             by_req.setdefault(q, []).append(r)
@@ -123,6 +126,11 @@ def _html(results, ex, meta, prev) -> str:
     sw = ex.get("sweep", [])
     sweep_rows = "".join(f"<tr><td>{s['base']}</td><td>{s['kmh']}</td><td>{s['friction']}</td><td>{_f(s['t_detect_ms'], ' ms')}</td>"
                          f"<td>{_f(s['stop_dist_m'], ' m')}</td><td>{s['max_lateral_m']} m</td><td>{'<span class=pass>PASS</span>' if s['passed'] else '<span class=fail>FAIL</span><br><small>' + html.escape(', '.join(s['failed'])) + '</small>'}</td></tr>" for s in sw)
+    ls = ex.get("load_sweep", [])
+    load_rows = "".join(f"<tr><td>{s['base']}</td><td>{s['payload_kg']:g}</td><td>{s['grade_pct']:+g}%</td><td>{s['mass_ratio']}</td>"
+                        f"<td>{s['peak_state']}</td><td>{s['cause'] or '–'}</td><td>{_f(s['t_detect_ms'], ' ms')}</td>"
+                        f"<td>{_f(s['stop_dist_m'], ' m')}</td><td>{_f(s['t_stop_ms'], ' ms')}</td>"
+                        f"<td>{'PASS' if s['passed'] else 'FAIL: ' + '; '.join(s['failed'])}</td></tr>" for s in ls)
     fs = ex.get("false_stop")
     fz = ex.get("fuzz")
     mu = ex.get("mutation")
@@ -169,7 +177,8 @@ reactions: DEGRADED (speed cap) → PULL_OVER (planner-executed) → STOP_IN_LAN
 <p class="mut">HiL and vehicle columns stay empty until the same scenarios run on hardware (see docs/CHANGES_V2.md, items 6.4–6.5).</p>
 <h2>Speed and lateral traces</h2><div class="grid">{charts}</div>
 {f"<h2>Sweep: speed × friction</h2><table><tr><th>Scenario</th><th>km/h</th><th>Friction</th><th>Detect</th><th>Stopping distance</th><th>Lateral</th><th>Verdict</th></tr>{sweep_rows}</table>" if sw else ""}
-{f"<h2>False-stop rate</h2><p>{fs['false_stops']} false stops in {fs['seeds']} × 60 s runs ({fs['km']} km). Rate {fs['per_100km']} per 100 km" + (f", 95% upper bound {fs['upper95_per_100km']} per 100 km (rule of three)" if fs['upper95_per_100km'] is not None else "") + ". <span class=warn>FINDING</span> with 0.5% CRC errors (far above real CAN error rates), two corrupted frames in a row make the next frame's counter jump count as a third error, which trips the E2E window. Tune the window or the max delta against the real bus error rate.</p>" if fs else ""}
+{f"<h2>Load sweep: payload × grade (dynamic plant)</h2><p>Brake and drive demands are mapped to force on the curb mass, so a payload gives proportionally less deceleration (curb / loaded = <i>mass ratio</i>). The brake-plausibility check (SR-11) trips below 50% of demand.</p><table><tr><th>Scenario</th><th>Payload kg</th><th>Grade</th><th>Mass ratio</th><th>Reaction</th><th>Cause</th><th>Detect</th><th>Stopping distance</th><th>Time to stop</th><th>Verdict</th></tr>{load_rows}</table>" if ls else ""}
+{f"<h2>False-stop rate</h2><p>{fs['false_stops']} false stops in {fs['seeds']} × 60 s runs ({fs['km']} km). Rate {fs['per_100km']} per 100 km" + (f", 95% upper bound {fs['upper95_per_100km']} per 100 km (rule of three)" if fs['upper95_per_100km'] is not None else "") + ". v2.0 finding, fixed in v2.6: two corrupted frames in a row made the next frame's counter jump count as a third error and tripped the E2E window. The receiver now treats a counter jump explained by the CRC failures just before it as frames lost, not a new error (Monte Carlo, 5M frames at 0.5% errors: 148 → 12 false stops per 1000 km; see docs/E2E_TUNING.md).</p>" if fs else ""}
 {f"<h2>Fuzzing</h2><p>{fz['runs']} random fault combinations; {fz['violating_runs']} with invariant violations or crashes.</p><pre>{html.escape(json.dumps(fz['examples'], indent=1)) if fz['examples'] else 'none'}</pre>" if fz else ""}
 {f"<h2>Mutation testing (testing the tests)</h2><table><tr><th>Mutant</th><th>Seeded bug</th><th>Result</th><th>First scenario that caught it</th></tr>{mu_rows}</table>" if mu else ""}
 {b2b_html}

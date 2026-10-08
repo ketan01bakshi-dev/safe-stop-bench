@@ -45,6 +45,7 @@ void Controller::init(const Config &cfg, uint32_t defects, bool warm_start) {
   if (has(M_LONG_TIMEOUT)) p_.cmd_timeout_ms = 1000;
   rx_has_last_ = false;
   rx_last_ = 0;
+  crc_fails_ = 0;
   win_n_ = 0;
   win_head_ = 0;
   sm_ = SM_NODATA;
@@ -83,6 +84,7 @@ void Controller::init(const Config &cfg, uint32_t defects, bool warm_start) {
   out_backup = false;
   out_prev_steer_ = 0.0;
   act_counter_ = 0;
+  status_counter_ = 0;
   rejected = 0;
   fault_active_t_ = -1000000000LL;
   release_rejected = 0;
@@ -147,15 +149,25 @@ void Controller::brownout(int64_t t, bool on) {
   }
 }
 
+// v2.6 "explained gaps": a counter jump covered by the CRC failures just before it is not a second error
+// (= ssb.e2e._Receiver with explain_gaps=True, the default since v2.6; max_delta 2).
 E2EStatus Controller::p5_check(const uint8_t *f, int len, const uint8_t **payload) {
-  if (len < 3) return E_WRONG_CRC;
+  if (len < 3) {
+    crc_fails_++;
+    return E_WRONG_CRC;
+  }
   uint8_t counter = f[2];
   const uint8_t id[2] = {(uint8_t)(DATA_ID & 0xFF), (uint8_t)(DATA_ID >> 8)};
   uint16_t crc = crc16_ccitt(&counter, 1);
   crc = crc16_ccitt(f + 3, (size_t)(len - 3), crc);
   crc = crc16_ccitt(id, 2, crc);
-  if (crc != (uint16_t)(f[0] | (f[1] << 8))) return E_WRONG_CRC;
+  if (crc != (uint16_t)(f[0] | (f[1] << 8))) {
+    crc_fails_++;
+    return E_WRONG_CRC;
+  }
   *payload = f + 3;
+  int explained = crc_fails_;
+  crc_fails_ = 0;
   if (!rx_has_last_) {
     rx_has_last_ = true;
     rx_last_ = counter;
@@ -165,7 +177,7 @@ E2EStatus Controller::p5_check(const uint8_t *f, int len, const uint8_t **payloa
   if (delta == 0) return E_REPEATED;
   rx_last_ = counter;
   if (delta == 1) return E_OK;
-  return delta <= 2 ? E_OK_SOME_LOST : E_WRONG_SEQUENCE;
+  return delta <= 2 + explained ? E_OK_SOME_LOST : E_WRONG_SEQUENCE;
 }
 
 SmState Controller::sm_update(E2EStatus s) {
@@ -422,16 +434,25 @@ int Controller::cycle(int64_t t, const Frame *frames, int n, const Feedback &fb,
   return 7;
 }
 
-void Controller::status_frame(uint8_t out[8]) const {
-  out[0] = powered ? (uint8_t)state : (uint8_t)OFF;
-  out[1] = (uint8_t)cause;
-  out[2] = challenge;
-  out[3] = mrm_pull_over ? 1 : 0;
+static_assert(OFF < 8, "SAF_Status packs the state in 3 bits");
+static_assert(C_SAFETY_RESET < 16, "SAF_Status packs the cause in 4 bits");
+
+void Controller::status_frame(uint8_t out[8]) {
+  uint8_t st = powered ? (uint8_t)state : (uint8_t)OFF;
+  out[1] = status_counter_;
+  status_counter_ = (uint8_t)(status_counter_ + 1);
+  out[2] = (uint8_t)((st & 0x07) | (mrm_pull_over ? 0x08 : 0) | (((uint8_t)cause & 0x0F) << 4));
+  out[3] = challenge;
   int16_t a = to_i16(pymax(-327.0, pymin(327.0, out_a)) * 100), s = to_i16(pymax(-327.0, pymin(327.0, out_s)) * 100);
   out[4] = (uint8_t)(a & 0xFF);
   out[5] = (uint8_t)((uint16_t)a >> 8);
   out[6] = (uint8_t)(s & 0xFF);
   out[7] = (uint8_t)((uint16_t)s >> 8);
+  uint8_t buf[9];
+  memcpy(buf, out + 1, 7);
+  buf[7] = (uint8_t)(STATUS_ID & 0xFF);
+  buf[8] = (uint8_t)(STATUS_ID >> 8);
+  out[0] = crc8_h2f(buf, 9);
 }
 
 // ---- framing -------------------------------------------------------------------------------------------------------------
@@ -499,6 +520,8 @@ void Node::begin(const NodeIo &io, const char *fw) {
   kick_src_ = 0;
   bus_monitor_ = false;
   n_pending_ = 0;
+  n_blob_ = 0;
+  config_seq_ = 0;
 }
 
 void Node::send(uint8_t type, const uint8_t *p, uint8_t n) {
@@ -524,29 +547,50 @@ void Node::gpio_kicks(int n, int64_t now_ms) {
   for (int i = 0; i < n; i++) sc.kick(now_ms - t0_);
 }
 
+bool Node::start(const uint8_t *p, uint8_t n, int64_t now_ms) {
+  if (n < 7 || p[6] != N_CONFIG || n < 7 + 8 * N_CONFIG) return false;
+  double v[N_CONFIG];
+  for (int i = 0; i < N_CONFIG; i++) v[i] = rd_f64(p + 7 + 8 * i);
+  Config cfg;
+  config_from_array(cfg, v);
+  uint32_t defects = (uint32_t)p[1] | ((uint32_t)p[2] << 8) | ((uint32_t)p[3] << 16) | ((uint32_t)p[4] << 24);
+  sc.init(cfg, defects, p[0] == 1);
+  kick_src_ = p[5] & 1;
+  bus_monitor_ = (p[5] >> 1) & 1;  // off for a single board: nobody would ACK, so error passive is expected
+  t0_ = now_ms;
+  next_cycle_ = 0;
+  n_pending_ = 0;
+  memset(&fb_, 0, sizeof fb_);
+  power_ok_ = pc_tx_ok_ = true;
+  last_release_ = false;
+  overflow_ = can_tx_fail_ = cycles_ = max_exec_us_ = 0;
+  max_late_ms_ = 0;
+  active_ = true;
+  return true;
+}
+
+bool Node::restore(const uint8_t *blob, uint8_t n, int64_t now_ms) {
+  if (n != 7 + 8 * N_CONFIG) return false;
+  uint8_t p[7 + 8 * N_CONFIG];
+  memcpy(p, blob, n);
+  p[0] = 2;   // cold
+  if (!start(p, n, now_ms)) return false;
+  sc.brownout(0, true);    // the reset: unpowered...
+  sc.brownout(0, false);   // ...and back: cold init, then latched STOP_IN_LANE with cause SAFETY_RESET (SG6)
+  memcpy(blob_, blob, n);
+  n_blob_ = n;
+  return true;
+}
+
 void Node::handle(int64_t now_ms) {
   const uint8_t *p = parser_.payload;
   const uint8_t n = parser_.len;
   switch (parser_.type) {
     case 'R': {
-      if (n < 7 || p[6] != N_CONFIG || n < 7 + 8 * N_CONFIG) return;
-      double v[N_CONFIG];
-      for (int i = 0; i < N_CONFIG; i++) v[i] = rd_f64(p + 7 + 8 * i);
-      Config cfg;
-      config_from_array(cfg, v);
-      uint32_t defects = (uint32_t)p[1] | ((uint32_t)p[2] << 8) | ((uint32_t)p[3] << 16) | ((uint32_t)p[4] << 24);
-      sc.init(cfg, defects, p[0] == 1);
-      kick_src_ = p[5] & 1;
-      bus_monitor_ = (p[5] >> 1) & 1;  // off for a single board: nobody would ACK, so error passive is expected
-      t0_ = now_ms;
-      next_cycle_ = 0;
-      n_pending_ = 0;
-      memset(&fb_, 0, sizeof fb_);
-      power_ok_ = pc_tx_ok_ = true;
-      last_release_ = false;
-      overflow_ = can_tx_fail_ = cycles_ = max_exec_us_ = 0;
-      max_late_ms_ = 0;
-      active_ = true;
+      if (!start(p, n, now_ms)) return;
+      n_blob_ = (uint8_t)(7 + 8 * N_CONFIG);
+      memcpy(blob_, p, n_blob_);
+      config_seq_++;
       uint8_t ack[1] = {(uint8_t)sc.state};
       send('A', ack, 1);
       return;
@@ -594,13 +638,12 @@ void Node::handle(int64_t now_ms) {
 }
 
 void Node::poll(int64_t now_ms) {
-  if (!active_) {
-    if (now_ms - last_hello_ >= 500) {
-      last_hello_ = now_ms;
-      send('H', (const uint8_t *)fw_, (uint8_t)strlen(fw_));
-    }
-    return;
+  // v2.9.7: a board restored after a real reset is active at once, so it says hello while active too (less often)
+  if (now_ms - last_hello_ >= (active_ ? 1000 : 500)) {
+    last_hello_ = now_ms;
+    send('H', (const uint8_t *)fw_, (uint8_t)strlen(fw_));
   }
+  if (!active_) return;
   const int64_t t = now_ms - t0_;
   while (next_cycle_ <= t) {
     sc.tx_ok = pc_tx_ok_ && !(bus_monitor_ && bus_fault_);
