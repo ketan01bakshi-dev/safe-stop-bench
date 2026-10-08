@@ -82,7 +82,8 @@ def _junit(path: Path, results: list) -> None:
             body = ""
         elif v.get("status") == "KNOWN":
             skips += 1
-            body = f'<skipped message="{escape(f"known finding: {v.get("known")} (failed: {failed})")}"/>'
+            reason = f"known finding: {v.get('known')} (failed: {failed})"   # no nested same quotes: Python 3.10+
+            body = f'<skipped message="{escape(reason)}"/>'
         else:
             fails += 1
             body = f'<failure message="{escape(failed)}"/>'

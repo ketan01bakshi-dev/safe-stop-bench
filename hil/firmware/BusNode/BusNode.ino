@@ -11,6 +11,10 @@
 // drives the watchdog pulses. Found on hardware: a burst of 30 kicks is 3 ms of busy-wait pulses, and with rollover off
 // (v2.9.4) RXB0 is A's only receive buffer, so B's back-to-back frames overflowed it: 40 overflows in 60 s with bursts,
 // 0 without. All SPI traffic now happens in the CAN task, so the two cores never share the bus.
+//
+// v2.12 (BusNode 2.7): power cut of board B. 'X' <ms:u16> from the PC energises the relay on GPIO6 for that long
+// (non-blocking, at most 60 s); the relay's normally-closed contact is in B's 5 V supply, so B loses power and comes back
+// when it releases. The pin is low at boot, so an A that resets or hangs in boot never leaves B unpowered.
 #include <Arduino.h>
 #include <SPI.h>
 #include <mcp2515.h>
@@ -29,6 +33,7 @@ static MCP2515 mcp(board::PIN_CAN_CS, CAN_SPI_HZ);
 static ssc::Parser parser;
 static char fw[64];
 static uint32_t last_diag = 0, last_hello = 0;
+static uint32_t relay_on_at = 0, relay_ms = 0;   // power cut of board B in progress (relay_ms > 0)
 
 // shared between the CAN task (writer) and loop() (reader); 32-bit and smaller stores are atomic on the ESP32-S3
 static volatile bool can_ok = false, can_started = false, force_diag = false;
@@ -129,11 +134,13 @@ void setup() {
   Serial.begin(board::LINK_BAUD);
   pinMode(board::PIN_WD_LINE, OUTPUT);
   digitalWrite(board::PIN_WD_LINE, LOW);
+  pinMode(board::PIN_RELAY, OUTPUT);
+  digitalWrite(board::PIN_RELAY, LOW);   // relay off: B powered
   const char *xtal = "none";
   can_ok = board::mcp_init(mcp, &xtal);
   can_started = can_ok;
   bukt = can_ok ? board::mcp_read_reg(0x60) : 0xEE;   // diagnostics: RXB0CTRL (BUKT must be 0)
-  snprintf(fw, sizeof fw, "BusNode 2.6 (A) CAN %s", can_ok ? xtal : "FAILED");
+  snprintf(fw, sizeof fw, "BusNode 2.7 (A) CAN %s", can_ok ? xtal : "FAILED");
   rxq = xQueueCreate(QUEUE_LEN, sizeof(struct can_frame));
   xTaskCreatePinnedToCore(can_task, "can_rx", 4096, nullptr, configMAX_PRIORITIES - 2, &can_task_h, 0);
   pinMode(board::PIN_CAN_INT, INPUT_PULLUP);
@@ -151,14 +158,24 @@ void loop() {
   int n;
   while ((n = Serial.available()) > 0) {
     uint8_t b = (uint8_t)Serial.read();
-    if (parser.push(b) && parser.type == 'K' && parser.len >= 1) {
+    if (!parser.push(b)) continue;
+    if (parser.type == 'K' && parser.len >= 1) {
       for (int i = 0; i < parser.payload[0]; i++) {   // busy-wait pulses: harmless now, CAN runs on the other core
         digitalWrite(board::PIN_WD_LINE, HIGH);
         delayMicroseconds(50);
         digitalWrite(board::PIN_WD_LINE, LOW);
         delayMicroseconds(50);
       }
+    } else if (parser.type == 'X' && parser.len >= 2 && relay_ms == 0) {
+      uint32_t ms = (uint32_t)parser.payload[0] | (uint32_t)parser.payload[1] << 8;
+      relay_ms = ms > 60000 ? 60000 : (ms ? ms : 1);
+      relay_on_at = millis();
+      digitalWrite(board::PIN_RELAY, HIGH);   // relay on: B's supply open
     }
+  }
+  if (relay_ms && millis() - relay_on_at >= relay_ms) {
+    digitalWrite(board::PIN_RELAY, LOW);      // relay off: B powered again
+    relay_ms = 0;
   }
   uint32_t now = millis();
   if (now - last_hello >= 1000) {

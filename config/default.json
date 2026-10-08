@@ -43,7 +43,10 @@
   },
   "dut_hw": {
     "_note": "v2.9.7: a real reset of the ESP32-S3 safety controller (EN pin) gives its first SAF_Status after 185-187 ms (measured, 5 resets). DUTs that can't really reset emulate it as a power loss this long.",
-    "reset_boot_ms": 186
+    "reset_boot_ms": 186,
+    "_note_power_cut": "v2.12: power_on_boot_ms = first SAF_Status after the supply returns. ASSUMED equal to the reset boot until measured with the relay (docs/HIL_POWER_CUT.md); relay_fitted = board A drives a relay in board B's 5 V supply (or pass run.py --relay).",
+    "power_on_boot_ms": 186,
+    "relay_fitted": false
   },
   "safety": {
     "cmd_timeout_ms": 100,

@@ -66,6 +66,7 @@ class SerialLink:
 
     def __init__(self, port: str, baud: int = 921600):
         import serial
+        self.port, self.baud = port, baud   # kept to reopen the port (v2.12: B's port vanishes during a power cut)
         self.url = "://" in port
         if "://" in port:   # e.g. socket://127.0.0.1:7777 (the board emulator)
             self.ser = serial.serial_for_url(port, timeout=0, write_timeout=1.0)
@@ -152,6 +153,8 @@ class LinkDUT(BlackBoxObserver, DeviceUnderTest):
         # B treats CAN transmit error-passive / bus-off as an actuator-bus fault only when another node can ACK
         self.bus_monitor = (link_a is not None) if bus_monitor is None else bus_monitor
         self.fb_period = fb_period_ms or (2 if self.realtime else 1)
+        self.relay_fitted = bool(cfg.get("dut_hw", {}).get("relay_fitted"))   # v2.12: A switches B's supply
+        self.b_down = False   # B unpowered by a power cut: its USB port is gone until the next prepare()
         self.pb, self.pa = Parser(), Parser()
         self.defects: frozenset = frozenset()
         self.diag: dict = {}
@@ -164,7 +167,7 @@ class LinkDUT(BlackBoxObserver, DeviceUnderTest):
 
     # ---- link helpers ----------------------------------------------------------------------------------------------
     def _read(self) -> tuple[list, list]:
-        mb = self.pb.feed(self.b.read())
+        mb = [] if self.b_down else self.pb.feed(self.b.read())
         ma = self.pa.feed(self.a.read()) if self.a else []
         return mb, ma
 
@@ -200,6 +203,8 @@ class LinkDUT(BlackBoxObserver, DeviceUnderTest):
             raise RuntimeError(f"board A ({self.a.name}) sent no hello: wrong port or wrong firmware")
 
     def prepare(self, warm_start: bool, defects=frozenset()) -> None:
+        if self.b_down:
+            self._reopen_b()
         self.defects = frozenset(defects)
         options = self.kick_src | (2 if self.bus_monitor else 0)
         payload = struct.pack("<BIBB", 1 if warm_start else 2, defects_mask(self.defects), options, len(cfg_array(self.cfg)))
@@ -258,7 +263,7 @@ class LinkDUT(BlackBoxObserver, DeviceUnderTest):
         for f in frames:
             if f.can_id == 0x100:
                 out += frame_msg("P", bytes(f.data)[:16])
-        if out:
+        if out and not self.b_down:
             try:
                 self.b.write(out, t)
             except Exception as e:
@@ -407,8 +412,46 @@ class LinkDUT(BlackBoxObserver, DeviceUnderTest):
         self.status_rx.reset()   # the board's alive counter restarts
         self.n_hw_resets = getattr(self, "n_hw_resets", 0) + 1
 
+    # ---- power cut (v2.12) ------------------------------------------------------------------------------------------
+    # Board A drives a relay in board B's 5 V supply ('X' <ms>, BusNode 2.7; docs/HIL_POWER_CUT.md). Unlike the reset,
+    # the whole board goes: CPU, CAN transceiver and USB-serial chip (B's USB lead has its 5 V line blocked, or USB would
+    # back-power the board). So the bench stops using B's port, reads B only through A on the bus (it always does), and
+    # reopens the port before the next scenario. As with the reset: OFF while down and booting; a board that doesn't
+    # come back stays OFF, which is a DUT verdict.
+    @property
+    def can_power_cut(self) -> bool:
+        return self.a is not None and (self.emulator is not None or self.relay_fitted)
+
+    def power_cut(self, t: int, ms: int) -> None:
+        self.a.write(frame_msg("X", struct.pack("<H", max(1, min(int(ms), 60000)))), t)
+        self.b_down = True
+        self.resetting_since = t
+        self.status_rx.reset()   # the board's alive counter restarts
+        self.n_power_cuts = getattr(self, "n_power_cuts", 0) + 1
+
+    def _reopen_b(self, timeout_s: float = 15.0) -> None:
+        """After a power cut: wait for B's port to come back (USB re-enumeration on the board), reopen it, wait for B."""
+        port, baud = self.b.port, self.b.baud
+        try:
+            self.b.close()
+        except Exception:  # noqa: BLE001 (the port vanished under us)
+            pass
+        t_end = time.time() + timeout_s
+        while True:
+            try:
+                self.b = SerialLink(port, baud)
+                break
+            except Exception as e:  # noqa: BLE001
+                if time.time() > t_end:
+                    raise BenchFault(f"board B's port {port} did not come back within {timeout_s:g} s after the power cut: {e}") from e
+                time.sleep(0.2)
+        self.b_down, self.pb = False, Parser()
+        self._wait_hello(5.0)
+
     def recover(self) -> None:
         """After a bench fault: reset both boards (EN via RTS) and wait for their hellos."""
+        if self.b_down:
+            self._reopen_b()
         for link in (self.b, self.a):
             if link is not None and hasattr(link, "reset_board"):
                 link.reset_board()
@@ -423,7 +466,10 @@ class LinkDUT(BlackBoxObserver, DeviceUnderTest):
     def close(self) -> None:
         for link in (self.b, self.a):
             if link:
-                link.close()
+                try:
+                    link.close()
+                except Exception:  # noqa: BLE001 (B's port may have vanished in a power cut)
+                    pass
         if self.emulator:
             self.emulator.close()
 

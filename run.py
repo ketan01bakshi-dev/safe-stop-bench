@@ -55,6 +55,7 @@ def main() -> int:
     ap.add_argument("--kick", choices=["usb", "gpio"], default="usb", help="with --dut hil: watchdog kicks over USB or the GPIO wire")
     ap.add_argument("--bus-monitor", action="store_true", help="with --dut pil: board A is on the bus, so B may treat CAN tx errors as a fault")
     ap.add_argument("--ros2-lockstep", action="store_true", help="with --dut ros2: wait for each 10 ms cycle instead of real time")
+    ap.add_argument("--relay", action="store_true", help="with --dut hil: board A switches board B's 5 V supply (docs/HIL_POWER_CUT.md)")
     ap.add_argument("--can-lockstep", action="store_true", help="with --dut can: wait for each 10 ms cycle instead of real time")
     ap.add_argument("--ros2-no-launch", action="store_true", help="with --dut ros2: don't start the reference node (a supplied node is running)")
     ap.add_argument("--file", default="fmu/SafeStopVecu.fmu", help="with --dut fmu: the FMU")
@@ -77,6 +78,8 @@ def main() -> int:
             ap.error("--payload needs --plant dynamic")
         cfg["plant"]["dynamic"]["payload_kg"] = a.payload
     defects = frozenset(a.defect)
+    if a.relay:
+        cfg.setdefault("dut_hw", {})["relay_fitted"] = True
     if a.dut == "reference":
         factory = lambda sc: ReferenceDUT(cfg, defects, warm_start=sc.get("start_kmh", 30) > 0)
     elif a.dut == "fmu":

@@ -45,7 +45,8 @@ def lib():
                "ssc_ctrl_cycle": ([P, I64, D, D, D, D, D, U8P], I),
                "ssc_ctrl_get": ([P, ctypes.POINTER(I), ctypes.POINTER(D)], None),
                "ssc_node_new": ([], P), "ssc_node_free": ([P], None), "ssc_node_feed": ([P, ctypes.c_char_p, I, I64], None),
-               "ssc_node_poll": ([P, I64], None), "ssc_node_read": ([P, U8P, I], I), "ssc_n_config": ([], I)}
+               "ssc_node_poll": ([P, I64], None), "ssc_node_read": ([P, U8P, I], I), "ssc_n_config": ([], I),
+               "ssc_node_config": ([P, U8P, I], I), "ssc_node_restore": ([P, ctypes.c_char_p, I, I64], I)}
         for name, (args, res) in sig.items():
             f = getattr(L, name)
             f.argtypes, f.restype = args, res
@@ -136,6 +137,15 @@ class LoopbackLink:
     def read(self) -> bytes:
         n = self.L.ssc_node_read(self.h, self.buf, len(self.buf))
         return bytes(self.buf[:n])
+
+    def config(self) -> bytes:
+        """The configuration the node last accepted (what board B keeps in NVS); empty before the first reset."""
+        n = self.L.ssc_node_config(self.h, self.buf, len(self.buf))
+        return bytes(self.buf[:n])
+
+    def restore(self, blob: bytes, now_ms: int) -> bool:
+        """Boot from a stored configuration, as board B does at power-on (v2.12: the emulated power cut)."""
+        return bool(self.L.ssc_node_restore(self.h, blob, len(blob), now_ms))
 
     def close(self) -> None:
         if self.h:

@@ -9,6 +9,9 @@
 namespace board {
 const int PIN_CAN_CS = 10, PIN_CAN_INT = 4, PIN_CAN_MOSI = 11, PIN_CAN_MISO = 13, PIN_CAN_SCK = 12;
 const int PIN_WD_LINE = 5;      // optional hardware watchdog line: board A GPIO5 -> board B GPIO5 (and a common GND)
+// v2.12, optional: board A GPIO6 -> IN of a high-level-trigger relay module whose NORMALLY CLOSED contact is in board B's
+// 5 V supply (docs/HIL_POWER_CUT.md). Low (A's default, also while A boots or resets) = relay off = B powered.
+const int PIN_RELAY = 6;
 const uint32_t LINK_BAUD = 921600;
 
 inline void mcp_rollover_off();

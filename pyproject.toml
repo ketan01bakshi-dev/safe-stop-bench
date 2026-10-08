@@ -1,6 +1,6 @@
 [project]
 name = "safe-stop-bench"
-version = "2.11"
+version = "2.12"
 description = "SiL bench for an autonomous vehicle's safety layer: E2E, watchdogs, envelope, actuator checks, latched minimal risk manoeuvres"
 requires-python = ">=3.10"
 dependencies = []

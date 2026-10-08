@@ -46,6 +46,8 @@
      "faults": [{"type": "safety_brownout", "start": 2000, "end": 2050}], "expect": {"reaction": "STOP_IN_LANE", "cause": ["SAFETY_RESET"], "stop": true, "latched": true}},
     {"id": "SC-41", "key": "safety_hw_reset", "title": "Safety controller really resets (EN pin on the board; elsewhere a power loss as long as its measured boot)", "req": ["SR-17"],
      "faults": [{"type": "safety_hw_reset", "start": 2000}], "expect": {"reaction": "STOP_IN_LANE", "cause": ["SAFETY_RESET"], "stop": true, "latched": true}},
+    {"id": "SC-42", "key": "safety_power_cut", "title": "Safety controller loses its supply for 300 ms (relay on the board: CPU, CAN transceiver and USB all go; elsewhere a power loss of the cut plus the boot)", "req": ["SR-17"],
+     "faults": [{"type": "safety_power_cut", "start": 2000, "ms": 300}], "expect": {"reaction": "STOP_IN_LANE", "cause": ["SAFETY_RESET"], "stop": true, "latched": true}},
     {"id": "SC-21", "key": "steering_stuck", "title": "Steering actuator stuck during a lane change", "req": ["SR-10"],
      "faults": [{"type": "steer_stuck", "start": 2000}, {"type": "lane_change", "start": 2000, "end": 3500, "steer_deg": 5.0}], "expect": {"reaction": "BRAKE_ONLY_STOP", "cause": ["STEER_ACTUATOR"], "stop": true, "latched": true}},
     {"id": "SC-22", "key": "steering_slow", "title": "Steering actuator 20× slower than specified", "req": ["SR-10"],

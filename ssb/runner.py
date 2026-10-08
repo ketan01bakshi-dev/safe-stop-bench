@@ -80,6 +80,11 @@ def _run_once(sc: dict, cfg: dict, dut: DeviceUnderTest | None, seed: int, keep_
     hw_resets = {f["start"] for f in sc.get("faults", []) if f["type"] == "safety_hw_reset"}
     real_reset = bool(hw_resets) and getattr(dut, "can_hw_reset", False)
     boot_ms = cfg.get("dut_hw", {}).get("reset_boot_ms", 186)
+    # v2.12: a power cut of the safety controller (supply relay on the board; CPU, transceiver and USB all go). Any
+    # other DUT: a power loss of the cut plus the board's boot after power-on.
+    cuts = {f["start"]: f["ms"] for f in sc.get("faults", []) if f["type"] == "safety_power_cut"}
+    real_cut = bool(cuts) and getattr(dut, "can_power_cut", False)
+    cut_boot_ms = cfg.get("dut_hw", {}).get("power_on_boot_ms", boot_ms)
     import time as _time
     max_lag_ms = 0.0
     lag_at_ms = None
@@ -133,8 +138,11 @@ def _run_once(sc: dict, cfg: dict, dut: DeviceUnderTest | None, seed: int, keep_
         act.steer_rate_factor = min([f["factor"] for f in _faults(sc, "steer_slow", t)], default=1.0)
         act.brake_factor = min([f["factor"] for f in _faults(sc, "brake_weak", t)], default=1.0)
         power_ok = not _faults(sc, "safety_brownout", t) and (real_reset or not any(s <= t < s + boot_ms for s in hw_resets))
+        power_ok = power_ok and (real_cut or not any(s <= t < s + ms + cut_boot_ms for s, ms in cuts.items()))
         if real_reset and t in hw_resets:
             dut.hw_reset(t)   # type: ignore[attr-defined]
+        if real_cut and t in cuts:
+            dut.power_cut(t, cuts[t])   # type: ignore[attr-defined]
 
         challenge = out.challenge if out else 0x5A
         mrm_req: str | None = out.mrm_request if out else None

@@ -8,15 +8,22 @@ Optionally also emulates board A, which forwards every CAN frame B sends.
 
 Why a separate process: a thread inside the bench fights the bench's 1 ms busy-wait for Python's GIL and runs late,
 which looks exactly like a slow MCU. A process has its own interpreter, like a real board has its own CPU.
+
+v2.12, power cut: 'X' <ms:u16> sent to emulated board A opens its relay, as BusNode 2.7 does on the board. Board B then
+loses power: it sends nothing, its link drops (on the board its USB-serial chip loses power and the COM port vanishes),
+and after the cut plus BOOT_MS a fresh node boots from the configuration it had stored, as the firmware does from NVS.
 """
 from __future__ import annotations
 
 import argparse
 import socket
+import struct
 import time
 
 from .hil import Parser, frame_msg
 from .native import LoopbackLink
+
+BOOT_MS = 186   # board B's measured boot after a reset (config dut_hw.reset_boot_ms); assumed the same after power-on
 
 
 def serve(port_b: int, port_a: int | None) -> None:
@@ -33,6 +40,9 @@ def serve(port_b: int, port_a: int | None) -> None:
             listeners[role] = s
     conns: dict[str, socket.socket] = {}
     node, par = LoopbackLink(), Parser()
+    par_a = Parser()                  # commands the bench sends to board A ('K' kicks, 'X' power cut)
+    boot_at = None                    # board B unpowered (then booting) until this time
+    stored = b""                      # B's configuration "in NVS"
     t0 = time.perf_counter()
     last_hello_a = -10000
     pending = {"a": bytearray(), "b": bytearray()}
@@ -50,21 +60,39 @@ def serve(port_b: int, port_a: int | None) -> None:
                 except BlockingIOError:
                     pass
         for role in list(conns):
+            if role not in conns:   # B's link was just closed by a power cut handled for A in this same pass
+                continue
             try:
                 data = conns[role].recv(65536)
                 if not data:
                     raise ConnectionError
-                if role == "b":
+                if role == "b" and node is not None:
                     node.write(data, now)
+                elif role == "a":
+                    for k, p in par_a.feed(data):
+                        if k == "X" and len(p) >= 2 and node is not None:   # relay opens: B loses power
+                            stored = node.config() or stored
+                            node.close()
+                            node, par = None, Parser()
+                            boot_at = now + struct.unpack_from("<H", p)[0] + BOOT_MS
+                            if "b" in conns:
+                                conns.pop("b").close()   # B's USB-serial chip is unpowered: the port vanishes
             except BlockingIOError:
                 pass
             except (ConnectionError, OSError):
                 conns.pop(role).close()
-                if role == "b":
+                if role == "b" and node is not None:
                     node.close()
                     node, par = LoopbackLink(), Parser()   # a new connection = a freshly booted board
-        node.poll(now)
-        out = node.read()
+        if node is None and boot_at is not None and now >= boot_at:
+            node, par = LoopbackLink(), Parser()             # power is back and B has booted: from its stored config
+            if stored:
+                node.restore(stored, now)
+            boot_at = None
+        out = b""
+        if node is not None:   # unpowered: B sends nothing (board A carries on)
+            node.poll(now)
+            out = node.read()
         if out:
             pending["b"] += out
             fwd = b"".join(frame_msg("M", p) for k, p in par.feed(out) if k == "M")

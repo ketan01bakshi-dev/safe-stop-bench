@@ -90,5 +90,17 @@ SSC_EXPORT int ssc_node_read(void *h, uint8_t *buf, int cap) {
   o.erase(o.begin(), o.begin() + n);
   return n;
 }
+// v2.12: the stored configuration and the boot path, so the board emulator can model a power cut (the firmware keeps
+// the blob in NVS and calls restore() at boot)
+SSC_EXPORT int ssc_node_config(void *h, uint8_t *buf, int cap) {
+  uint8_t n = 0;
+  const uint8_t *b = ((HostNode *)h)->node.config_blob(&n);
+  int k = (int)n < cap ? (int)n : cap;
+  memcpy(buf, b, k);
+  return k;
+}
+SSC_EXPORT int ssc_node_restore(void *h, const uint8_t *blob, int n, int64_t now) {
+  return ((HostNode *)h)->node.restore(blob, (uint8_t)n, now) ? 1 : 0;
+}
 SSC_EXPORT int ssc_n_config() { return N_CONFIG; }
 #endif

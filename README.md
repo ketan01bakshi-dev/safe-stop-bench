@@ -1,6 +1,6 @@
 # safe-stop-bench
 
-**A test bench for the safety layer between an autonomous vehicle's planner and its actuators. The same 55 scenarios run at seven levels: Python SiL, a separate process over CAN, a ROS 2 node, an FMI 2.0 FMU, the firmware's C++ on the PC, the board's node logic over its link protocol, and two ESP32-S3 boards on a real CAN bus.**
+**A test bench for the safety layer between an autonomous vehicle's planner and its actuators. The same 56 scenarios run at seven levels: Python SiL, a separate process over CAN, a ROS 2 node, an FMI 2.0 FMU, the firmware's C++ on the PC, the board's node logic over its link protocol, and two ESP32-S3 boards on a real CAN bus.**
 
 ```text
 planner (the "doer") ──CAN FD, E2E Profile 5, 20 ms──► SAFETY CONTROLLER (the "checker", device under test) ──classic CAN, E2E Profile 2──► actuator ECU ──► vehicle model
@@ -18,19 +18,19 @@ A learned planner can't be fully verified, but the simple controller that checks
 
 ## The levels
 
-| `--dut` | What runs the safety controller | What it proves | Result (v2.11 unless noted) |
+| `--dut` | What runs the safety controller | What it proves | Result (v2.12 unless noted) |
 |---|---|---|---|
-| `reference` | Python reference model | The requirements and the test suite | ✅ 54/55 + 1 known finding |
-| `can` | A **separate process**, reachable only over CAN (python-can + cantools DBC) | The black-box method, with real transport | ✅ lockstep: 54/55 + 1 known, back-to-back **exact 55/55**, unaffected by host stalls; real time needs a quiet PC |
+| `reference` | Python reference model | The requirements and the test suite | ✅ 55/56 + 1 known finding |
+| `can` | A **separate process**, reachable only over CAN (python-can + cantools DBC) | The black-box method, with real transport | ✅ lockstep: 55/56 + 1 known, back-to-back **exact 56/56**, unaffected by host stalls; real time needs a quiet PC |
 | `ros2` | A **ROS 2 node** in its own process, reachable only through topics (WSL) | The same method over ROS 2 | ✅ 53/54 + 1 known, back-to-back 54/54 (v2.8, 54 scenarios then) |
-| `fmu` | An **FMI 2.0 co-simulation FMU** via FMPy, wired through a name/unit/enum **mapping file** | Testing a supplied vECU | ✅ back-to-back **exact 55/55** |
-| `native` / `loopback` | The **firmware's C++ core** on the PC; then the board's whole node logic over the link protocol | The port is bit-exact before it goes on a chip | ✅ back-to-back **exact 55/55** each |
-| `pil` / `hil` | **ESP32-S3** + MCP2515/TJA1050: board B is the controller, board A reads its outputs **from a real 500 kbit/s CAN bus**; GPIO watchdog wire; real reset mid-scenario | Real MCU timing, a real bus | ✅ 54/55 + 1 known, 0 FAIL, back-to-back 55/55 (v2.9.8, [first-run report](docs/HIL_FIRST_RUN.md)) |
+| `fmu` | An **FMI 2.0 co-simulation FMU** via FMPy, wired through a name/unit/enum **mapping file** | Testing a supplied vECU | ✅ back-to-back **exact 56/56** |
+| `native` / `loopback` | The **firmware's C++ core** on the PC; then the board's whole node logic over the link protocol | The port is bit-exact before it goes on a chip | ✅ back-to-back **exact 56/56** each |
+| `pil` / `hil` | **ESP32-S3** + MCP2515/TJA1050: board B is the controller, board A reads its outputs **from a real 500 kbit/s CAN bus**; GPIO watchdog wire; real reset mid-scenario | Real MCU timing, a real bus | ✅ 54/55 + 1 known, 0 FAIL, back-to-back 55/55 (v2.9.8, 55 scenarios then; [first-run report](docs/HIL_FIRST_RUN.md)). Power cut via a relay: prepared, not yet run ([plan](docs/HIL_POWER_CUT.md)) |
 
 ## Quick start
 
 ```bash
-python run.py                                   # 55 scenarios → reports/report.html (standard library only)
+python run.py                                   # 56 scenarios → reports/report.html (standard library only)
 python run.py --full                            # + speed × friction sweep, false-stop rate, fuzzing, mutation score
 python run.py --defect no_latch                 # run against one of 14 seeded bugs: the suite must catch it
 python -m unittest discover -s tests -v
@@ -76,8 +76,9 @@ Every item, with its status and reason: [docs/CHANGES_V2.md](docs/CHANGES_V2.md)
 | [HIL_ESP32.md](docs/HIL_ESP32.md) | The SiL → PiL → HiL ladder, architecture, honest deviations |
 | [HIL_BRINGUP.md](docs/HIL_BRINGUP.md) | Step-by-step hardware bring-up, with a pass criterion for each step |
 | [HIL_FIRST_RUN.md](docs/HIL_FIRST_RUN.md) | What happened on the two boards: findings, probes, fixes, result tables |
+| [HIL_POWER_CUT.md](docs/HIL_POWER_CUT.md) | The power-cut test, prepared before the relay arrives: parts, wiring, procedure, expected results |
 | [DYNAMIC_PLANT.md](docs/DYNAMIC_PLANT.md), [E2E_TUNING.md](docs/E2E_TUNING.md) | Mass / payload / grade plant; E2E false-stop tuning |
-| [CHANGES_V2.md](docs/CHANGES_V2.md) | Every version from v2.0 to v2.11: what changed, what's done, partial or not done, and why |
+| [CHANGES_V2.md](docs/CHANGES_V2.md) | Every version from v2.0 to v2.12: what changed, what's done, partial or not done, and why |
 
 ## Layout
 
@@ -92,7 +93,7 @@ Every item, with its status and reason: [docs/CHANGES_V2.md](docs/CHANGES_V2.md)
 | `ssb/fmu_contract.py`, `ssb/fmu_inspect.py`, `fmu/` | FMU contract, intake tool, reference, supplier-style and C FMU sources and mappings |
 | `ssb/native.py`, `ssb/hil.py`, `ssb/hil_emu.py` | C++ core via ctypes; link protocol, PiL/HiL adapters, board emulator |
 | `hil/SafeStopCore/`, `hil/firmware/` | Portable C++ core (Arduino library); SafetyNode (board B), BusNode (board A) and SPI diagnostic sketches |
-| `scripts/*_probe.py`, `scripts/spi_stress.py` | The hardware probes behind the findings above |
+| `scripts/*_probe.py`, `scripts/spi_stress.py` | The hardware probes behind the findings above, and the power-cut probe |
 | `scenarios/`, `safety/`, `config/`, `dbc/` | Scenarios traced to requirements; hazards → goals → requirements (with FTTI); SOTIF catalogue; configs; DBC |
 
 ## License

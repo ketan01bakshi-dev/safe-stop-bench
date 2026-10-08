@@ -241,6 +241,7 @@ class DbcTests(unittest.TestCase):
         """v2.10: SAF_Status built through the DBC (as the vECU process does) is byte for byte the shared E2E layout,
         decodes to the same fields, and passes the receiver."""
         import random
+
         from ssb import canio
         rng, rx = random.Random(7), e2e.StatusReceiver()
         for k in range(300):
@@ -724,6 +725,26 @@ class HwResetTests(unittest.TestCase):
         self.assertFalse(oracle.verdict(r, sc, REQS, CFG)["passed"])
 
 
+class PowerCutTests(unittest.TestCase):
+    """v2.12: the safety controller loses its supply (SC-42). On the boards a relay driven by board A cuts B's 5 V; any
+    other DUT gets a power loss of the cut plus the boot after power-on (dut_hw.power_on_boot_ms), then must come back
+    latched with SAFETY_RESET while the actuator ECU brakes on its own."""
+
+    def test_emulated_power_cut_comes_back_latched(self):
+        sc = by_key("safety_power_cut")
+        r = runner.run(sc, CFG, keep_trace=False)
+        back = 2000 + sc["faults"][0]["ms"] + CFG["dut_hw"]["power_on_boot_ms"]
+        self.assertEqual(r["states"], [(0, "NORMAL"), (2000, "OFF"), (back, "STOP_IN_LANE")])
+        self.assertEqual(r["cause"], "SAFETY_RESET")
+        self.assertTrue(r["ecu_fallback"])
+        self.assertTrue(oracle.verdict(r, sc, REQS, CFG)["passed"])
+
+    def test_a_dut_that_forgets_the_latch_fails(self):
+        sc = by_key("safety_power_cut")
+        r = runner.run(sc, CFG, ReferenceDUT(CFG, frozenset({"no_latch"})), keep_trace=False)
+        self.assertFalse(oracle.verdict(r, sc, REQS, CFG)["passed"])
+
+
 class NativeHilTests(unittest.TestCase):
     """The ESP32 firmware's C++ (hil/SafeStopCore) built for the PC: the controller alone, and board B's whole node
     behind the link protocol. Skipped if the DLL can't be built (needs: pip install ziglang)."""
@@ -787,6 +808,51 @@ class NativeHilTests(unittest.TestCase):
             hil.make("pil", self.cfg)
         with self.assertRaises(ValueError):
             hil.make("hil", self.cfg)
+
+    def test_node_boots_latched_from_its_stored_config(self):
+        """v2.12: what board B does at power-on (config from NVS -> restore), in the host build."""
+        import struct
+
+        from ssb import hil
+        from ssb.native import LoopbackLink, cfg_array
+        n = LoopbackLink()
+        self.assertEqual(n.config(), b"")                       # nothing stored before the first reset
+        v = cfg_array(self.cfg)
+        n.write(hil.frame_msg("R", struct.pack("<BIBB", 1, 0, 0, len(v)) + struct.pack(f"<{len(v)}d", *v)), 0)
+        blob = n.config()
+        n.close()
+        m = LoopbackLink()
+        self.assertTrue(m.restore(blob, 5000))
+        m.poll(5000)
+        st = [p for k, p in hil.Parser().feed(m.read()) if k == "M" and (p[0] | p[1] << 8) == 0x201]
+        m.close()
+        data = st[0][3:11]
+        self.assertTrue(e2e.StatusReceiver().check(data))
+        u = e2e.status_unpack(data)
+        self.assertEqual((u["counter"], u["state"], u["cause"]), (0, 4, 14))   # STOP_IN_LANE, SAFETY_RESET
+
+    def test_power_cut_through_board_a_on_emulated_boards(self):
+        """v2.12: 'X' to board A opens the relay; B goes silent, its port vanishes, it boots from its stored config,
+        and the bench reopens its port for the next scenario. Real time on a PC: asserts the timeline, not the lag."""
+        try:
+            import serial  # noqa: F401
+        except ImportError:
+            self.skipTest("pyserial not installed")
+        from ssb import hil
+        d = hil.make("hil", self.cfg, port_b="EMU", port_a="EMU")
+        try:
+            self.assertTrue(d.can_power_cut)
+            r1 = runner.run(by_key("safety_power_cut", self.cfg), self.cfg, d, keep_trace=False)
+            r2 = runner.run(by_key("command_link_lost", self.cfg), self.cfg, d, keep_trace=False)   # B's port reopened
+            cuts = d.n_power_cuts
+        finally:
+            d.close()
+        self.assertGreaterEqual(cuts, 1)
+        (t0, s0), (t1, s1), (t2, s2) = r1["states"]
+        self.assertEqual((t0, s0, t1, s1, s2), (0, "NORMAL", 2000, "OFF", "STOP_IN_LANE"))
+        self.assertLessEqual(abs(t2 - (2000 + 300 + self.cfg["dut_hw"]["power_on_boot_ms"])), 15)
+        self.assertEqual(r1["cause"], "SAFETY_RESET")
+        self.assertEqual(r2["cause"], "TIMEOUT")
 
     def test_realtime_path_with_emulated_boards(self):
         """The hardware path minus the hardware: B (+ A) emulated in a separate process on its own clock, reached

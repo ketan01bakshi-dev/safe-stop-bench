@@ -152,4 +152,4 @@ The first full matrix with no FAIL at all, twice in a row, without hand-picking 
 
 ## Not yet done (needs parts)
 
-A real power cut through a relay (a reset is now done for real, v2.9.7; a power cut also drops the CAN transceiver), CAN FD (MCP2518FD), an independent USB-CAN sniffer. See `IMPROVEMENTS.md` 6.5 and the hardware plan in the v2.8 notes.
+A real power cut through a relay (prepared in v2.12: SC-42, BusNode 2.7, wiring and procedure in `HIL_POWER_CUT.md`; needs the relay, a 5 V supply and a data-only USB lead), CAN FD (MCP2518FD), an independent USB-CAN sniffer. See `IMPROVEMENTS.md` 6.5 and the hardware plan in the v2.8 notes.
