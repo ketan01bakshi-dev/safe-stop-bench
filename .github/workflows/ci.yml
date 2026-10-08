@@ -1,5 +1,8 @@
 name: safe-stop-bench-v2
 on: [push, pull_request]
+permissions:
+  contents: read
+  checks: write          # the JUnit report action posts its results as a check
 jobs:
   bench:
     runs-on: ubuntu-latest
@@ -7,13 +10,13 @@ jobs:
       matrix:
         config: [config/default.json, config/offroad.json]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m unittest discover -s tests -v
       - run: python run.py --config ${{ matrix.config }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: report-${{ strategy.job-index }}
@@ -21,12 +24,44 @@ jobs:
   full:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python run.py --full
-      - uses: mikepenz/action-junit-report@v4
+      - uses: mikepenz/action-junit-report@v6
         if: always()
         with:
           report_paths: reports/*_junit.xml
+  # v2.11: the safety controller as a separate process, reachable only over CAN (python-can udp_multicast + the DBC),
+  # in lockstep: the bench waits for each 10 ms cycle, so a shared runner's stalls can't change a verdict. Real time
+  # is not run here (it needs a quiet machine). Also builds the firmware's C++ core so the C++ / DBC tests run.
+  can-lockstep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[can,hil]"
+      - run: python scripts/build_native.py
+      # only the CAN / E2E / DBC / C++ tests: their checks don't depend on timing (the other jobs run the whole suite)
+      - run: python -m unittest -v tests.test_bench_v2.DbcTests tests.test_bench_v2.StatusE2ETests tests.test_bench_v2.StatusLayoutAcrossLevelsTests tests.test_bench_v2.CanLockstepTests
+      - run: python run.py --dut can --can-lockstep --b2b-dut
+      - name: back-to-back must be exact
+        run: |
+          python - <<'EOF'
+          import json, sys
+          d = json.load(open("reports/report_can_results.json", encoding="utf-8"))
+          rows = d["extras"]["b2b"]["rows"]
+          bad = [(r["key"], r["diffs"]) for r in rows if not r["match"]]
+          print(f"back-to-back (lockstep, 10 ms grid): {len(rows) - len(bad)}/{len(rows)}")
+          for b in bad:
+              print("  ", b)
+          sys.exit(1 if bad or not rows else 0)
+          EOF
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: report-can-lockstep
+          path: reports/

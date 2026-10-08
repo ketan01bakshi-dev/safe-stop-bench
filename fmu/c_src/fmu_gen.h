@@ -43,7 +43,7 @@
 static const fmi2Integer INT_START[N_INT] = {0, 14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 static const fmi2Boolean BOOL_START[N_BOOL] = {fmi2True, fmi2True, fmi2False};
 
-#define MODEL_GUID "{208e43d1-5ec5-da2e-3e6c-7ec626f5251d}"
+#define MODEL_GUID "{69e8e542-c450-d0a9-7868-c00ccff5cbc6}"
 #define N_CONFIGS 2
 static const char *const CONFIG_NAMES[N_CONFIGS] = {"default", "offroad"};
 static const double CONFIG_VALUES[N_CONFIGS][24] = {  // order of ssc::Config / ssb.native.CFG_KEYS
