@@ -9,6 +9,7 @@ dependencies = []
 fmu = ["fmpy", "pythonfmu", "cantools"]   # FmuDUT adapter + building the reference FMUs (tested, v2.2)
 can = ["python-can", "cantools", "msgpack"] # CanDUT adapter (tested, v2.1)
 hil = ["pyserial", "ziglang"]               # ESP32-S3 PiL/HiL link + building the C++ core for the PC (v2.3)
+security = ["numpy"]                          # security/ids.py: the intrusion detector's small neural net (v2.24)
 fleet = ["paho-mqtt", "amqtt"]                # OTA over a local MQTT broker + telemetry (v2.27); the tests skip without it
 llm = ["anthropic"]                           # design/ drafter: Claude Sonnet 5.5 (v2.16)
 dev = ["ruff", "mypy"]

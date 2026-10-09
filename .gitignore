@@ -8,6 +8,7 @@ secrets/
 broker_passwd
 wifi_secrets*.h
 .env.wifi
+*.egg-info/
 reports/
 fmu/*.fmu
 hil/build/
