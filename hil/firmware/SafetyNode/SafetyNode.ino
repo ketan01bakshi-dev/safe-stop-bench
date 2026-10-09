@@ -16,6 +16,7 @@
 #include <ssc_uds.h>
 #include <Preferences.h>
 #include "ssc_ota.h"
+#include "ssc_net.h"
 
 // v2.26: the minor version is a build flag (-DFW_MINOR=10), so the bench can build several signed images from one source.
 // -DOTA_UNHEALTHY=1 builds an image whose health check fails: the OTA rollback test.
@@ -36,7 +37,8 @@ static uint8_t stored[256], stored_n = 0;
 static uint32_t saved_seq = 0;
 static bool restored = false;
 static bool pc_session = false;   // a boot-time restore leaves the node 'active' in its latched stop; that is not a run in progress
-static ssc::Parser ota_parser;   // a second parser on the same bytes: it only reacts to the 'U' (OTA) messages
+static ssc::Parser ota_parser;   // a second parser on the same bytes: it only reacts to the 'U' (OTA) and 'N' (network set-up) messages
+static ssc::Parser net_parser;   // the same for messages that arrive over MQTT (only 'U' is accepted from the network)
 static ssc::uds::Node uds_node = {ssc::uds::ID_B_REQ, ssc::uds::ID_B_RESP, FW_VERSION, 0};
 
 static bool can_tx(void *, uint16_t id, const uint8_t *d, uint8_t n) {
@@ -73,6 +75,7 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(board::PIN_WD_LINE), on_wd_edge, RISING);
   snprintf(fw, sizeof fw, "SafetyNode " FW_VERSION " (B) CAN %s", can_ok ? xtal : "FAILED - PiL only");
   uds_node.serial = (uint32_t)ESP.getEfuseMac();
+  net::begin();   // credentials come from flash; a board with none never switches the radio on
   ota::boot_check(health_ok());   // a trial image that is unhealthy, or was reset before it confirmed, goes back to the old slot
   ssc::NodeIo io = {can_tx, ser_tx, us_now, nullptr};
   node.begin(io, fw);
@@ -114,8 +117,23 @@ void loop() {
       if (!ota_parser.push(buf[i])) continue;
       if (ota_parser.type == 'R') pc_session = true;   // the PC started a run: no update until the next reset
       else if (ota_parser.type == 'U') ota::handle(ota_parser.payload, ota_parser.len, node.active() && pc_session, FW_VERSION);
+      else if (ota_parser.type == 'N') net::handle(ota_parser.payload, ota_parser.len);
     }
     node.feed(buf, (size_t)n, (int64_t)millis());
+  }
+  // v2.28: the radio is off while a scenario runs; messages that came in over MQTT are the same OTA messages, answered over MQTT.
+  net::poll(!(node.active() && pc_session), fw);
+  {
+    uint8_t m[sizeof(net::Msg::d)];
+    size_t ml;
+    while (net::pop(m, &ml)) {
+      for (size_t i = 0; i < ml; i++) {
+        if (!net_parser.push(m[i]) || net_parser.type != 'U') continue;
+        ota::sink = net::publish;
+        ota::handle(net_parser.payload, net_parser.len, node.active() && pc_session, FW_VERSION);
+        ota::sink = nullptr;
+      }
+    }
   }
   persist_config();
   ota::confirm_when_stable(millis(), health_ok(), FW_VERSION);

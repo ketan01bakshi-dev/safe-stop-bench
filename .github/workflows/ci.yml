@@ -35,6 +35,8 @@ jobs:
       - run: pip install -e ".[fleet]"
       - run: python -m fleet.ota_matrix --emulated
       - run: python -m fleet.ota_matrix --emulated --mqtt
+      - run: python -m fleet.ota_matrix --emulated --wifi
+      - run: python -m unittest -v tests.test_wifi
       - run: python -m fleet.ota_matrix --emulated --cut-windows
       - run: python -m unittest -v tests.test_fleet
       - uses: mikepenz/action-junit-report@v6

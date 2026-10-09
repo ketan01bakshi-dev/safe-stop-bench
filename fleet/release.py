@@ -48,8 +48,14 @@ LIMIT_MQTT = ("The update reaches the real board through a broker and a PC gatew
               "Add Wi-Fi + an MQTT client to SafetyNode (the network credentials stay out of the repo) and point the gateway's topics at it")
 
 
+LIMIT_WIFI = ("The board's own Wi-Fi link is plain MQTT (no TLS) with one login shared by every board, on a LAN you trust: the signature protects the "
+              "image, not the link, so an attacker on that network can stop an update, not forge one", "Medium",
+              "Add TLS with the broker's certificate pinned in the board, and one login per board")
+
+
 def limits(ev: dict) -> list[tuple[str, str, str]]:
-    return [LIMIT_MQTT if ev.get("ota_mqtt_real") else LIMIT_USB] + LIMITS
+    first = LIMIT_WIFI if ev.get("ota_wifi_real") else LIMIT_MQTT if ev.get("ota_mqtt_real") else LIMIT_USB
+    return [first] + LIMITS
 
 
 def _load(path: Path):
@@ -65,7 +71,8 @@ def gather(reports: Path = REPORTS) -> dict:
              "ota_real": reports / "fleet" / "ota_matrix_real.json", "rollout_good": reports / "fleet" / "rollout_good.json",
              "rollout_bad": reports / "fleet" / "rollout_bad.json",
              "ota_mqtt_emulated": reports / "fleet" / "ota_matrix_emulated_mqtt.json", "ota_mqtt_real": reports / "fleet" / "ota_matrix_real_mqtt.json",
-             "ota_cut_emulated": reports / "fleet" / "ota_cut_emulated.json", "ota_cut_real": reports / "fleet" / "ota_cut_real.json"}
+             "ota_cut_emulated": reports / "fleet" / "ota_cut_emulated.json", "ota_cut_real": reports / "fleet" / "ota_cut_real.json",
+             "ota_wifi_emulated": reports / "fleet" / "ota_matrix_emulated_wifi.json", "ota_wifi_real": reports / "fleet" / "ota_matrix_real_wifi.json"}
     ev = {k: _load(p) for k, p in files.items()}
     ev["_files"] = {k: p for k, p in files.items() if p.exists()}
     ev["dashboard"] = dashboard.build(reports / "design", reports / "health")
@@ -97,7 +104,8 @@ def decide(ev: dict) -> Decision:
                 risks.append(f"residual risk {r['id']} {r['key']}: valid, fresh, in-envelope forged commands are invisible to E2E and the intrusion detector")
             elif r["safety_status"] == "KNOWN":
                 risks.append(f"known finding {r['id']} {r['key']}: stop later than its FTTI")
-    for key in ("ota_emulated", "ota_real", "ota_mqtt_emulated", "ota_mqtt_real", "ota_cut_emulated", "ota_cut_real"):
+    for key in ("ota_emulated", "ota_real", "ota_mqtt_emulated", "ota_mqtt_real", "ota_cut_emulated", "ota_cut_real",
+                "ota_wifi_emulated", "ota_wifi_real"):
         for r in ev.get(key) or []:
             if not r["ok"]:
                 no_go.append(f"OTA scenario {r['id']} ({key[4:].replace('_', ' ')}) fails: {r['title']}")
@@ -131,7 +139,8 @@ def render(d: Decision, ev: dict) -> str:
         lines.append(f"| {label} | {sum(r['ok'] for r in rows)}/{len(rows)} meet their expectation |")
     for k, label in (("ota_emulated", "OTA scenarios, emulated board"), ("ota_real", "OTA scenarios, real board"),
                      ("ota_mqtt_emulated", "OTA scenarios, emulated board over MQTT"), ("ota_mqtt_real", "OTA scenarios, real board over MQTT"),
-                     ("ota_cut_emulated", "Power-cut windows (REL-11/12), emulated board"), ("ota_cut_real", "Power-cut windows (REL-11/12), real board")):
+                     ("ota_cut_emulated", "Power-cut windows (REL-11/12), emulated board"), ("ota_cut_real", "Power-cut windows (REL-11/12), real board"),
+                     ("ota_wifi_emulated", "OTA scenarios, stand-in board on the network"), ("ota_wifi_real", "OTA scenarios, real board over its own Wi-Fi")):
         rows = ev.get(k)
         if k not in ("ota_emulated", "ota_real") and not rows:
             continue

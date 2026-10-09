@@ -11,6 +11,7 @@ verdict**. Everything here reads the bench's own report files; nothing here can 
 | `ota_matrix.py` | The release scenarios **REL-01..10** (`safety/hazards.json`, hazard H9 / goal SG9), as one ordered sequence. `--emulated` or `--real COM13` |
 | `rollout.py` / `rollouts.py` | Staged rollout over a mixed fleet (canary → a quarter → the rest) with one halt rule; the two runs of the release: a good build and a build that fails its health check |
 | `mqtt_link.py` | The same update through a local MQTT broker: `LocalBroker` (amqtt), `MqttLink` (what the client sees as a serial link) and `Gateway` (puts an emulated or the real board behind the broker) |
+| `provision.py` / `broker.py` | v2.28: the PC side of the board's Wi-Fi set-up (`'N'` messages over USB) and the login-protected LAN broker. Scripts: `scripts/provision_wifi.py`, `python -m fleet.broker login \| serve \| addresses` |
 | `telemetry.py` | Safety events as JSON (boot, staged / commit / rollback, resets, SAF_Status changes read off the bus) to `ssb/fleet/<device>/<event>`; best effort, never blocks a test |
 | `release.py` | One verdict — **BLOCKED / NO GO / GO WITH RISKS / GO** — from preflight + attack matrices + OTA matrices + both rollouts + the design campaigns, with the rules stated and every input file hashed |
 
@@ -23,6 +24,7 @@ python -m fleet.ota_matrix --real COM13        board B on SafetyNode 2.10, idle,
 python -m fleet.ota_matrix --emulated --mqtt   the same through a local broker (add --mqtt to --real too); needs pip install -e ".[fleet]"
 python -m fleet.ota_matrix --emulated --cut-windows           REL-11/12: power lost at each final write of an update
 python -m fleet.ota_matrix --build-cut-images                 the seven images --real --cut-windows needs
+python -m fleet.ota_matrix --real COM13 --wifi  REL-01..10 over the board's own Wi-Fi (docs/WIFI_SETUP.md: provision it first)
 python -m fleet.rollouts --real COM13          good build over a mixed fleet; bad build over 200 emulated boards
 python -m fleet.release                        -> reports/fleet/release_report.md / .json
 ```

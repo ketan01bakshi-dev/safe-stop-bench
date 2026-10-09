@@ -3,6 +3,11 @@ reports/traces/
 .venv/
 hil/build/
 fleet/images/
+secrets/
+*.passwd
+broker_passwd
+wifi_secrets*.h
+.env.wifi
 reports/
 fmu/*.fmu
 hil/build/

@@ -27,7 +27,7 @@
 #include <ssc_core.h>
 #include <ssc_uds.h>
 
-#define FW_VERSION "2.8"
+#define FW_VERSION "2.12"   // v2.29: receive-latency diagnostics (lat_* below); the CAN interrupt is now installed on the CAN task's core
 
 #ifndef CAN_SPI_HZ
 #define CAN_SPI_HZ 10000000   // the library default
@@ -48,6 +48,18 @@ static volatile bool can_ok = false, can_started = false, force_diag = false;
 static volatile uint32_t rx_count = 0, overflows = 0, q_drops = 0, int_cleared = 0, rx1_cleared = 0;
 static volatile uint16_t reinits = 0, glitches = 0, rx1_mismatch = 0, q_high = 0;
 static volatile uint8_t last_eflg = 0, bad_mode = 0, last_stat = 0, bukt = 0xEE;
+// v2.29: how long the CAN task takes to react to a frame, to find out why the single receive buffer sometimes overflows.
+// lat = from the INT edge (stamped in the ISR) to the first line of the task after it wakes; drain = time spent in drain_rxb0().
+// B sends two frames about 230 us apart and RXB0 holds one, so a latency + drain above ~230 us loses the second frame.
+static volatile uint32_t int_us = 0, last_lat = 0, last_drain = 0, lat_max = 0, drain_max = 0, ovf_lat = 0, ovf_drain = 0;
+static volatile uint32_t lat_hist[5] = {0, 0, 0, 0, 0};   // < 50, < 100, < 230, < 1000, >= 1000 us
+// The overflow flag is read every 2 ms, so "what the task was doing" has to be the worst of the whole 2 ms window, not the last wake.
+// win_* are reset at every flag read; each overflow is filed under every cause that was present in its window (they can overlap),
+// and under ovf_none when nothing was.  [0] slow wake >= 230 us  [1] long drain >= 150 us  [2] RXB1 misread  [3] SPI mode glitch  [4] none
+static volatile uint32_t win_lat = 0, win_drain = 0, win_mismatch = 0, win_glitch = 0, ovf_by[5] = {0, 0, 0, 0, 0};
+// The number that decides it: time from the CAN interrupt until RXB0 is FREE again (RX0IF cleared). B's frames are back to back
+// (~222 us each at 500 kbit/s), so the next frame overflows the single buffer if this exceeds roughly 220 us.
+static volatile uint32_t wake_us = 0, win_clr = 0, clr_max = 0, clr_hist[5] = {0, 0, 0, 0, 0};   // < 50, < 100, < 150, < 200, >= 200 us
 static QueueHandle_t rxq, txq;
 static ssc::uds::Node uds_node = {ssc::uds::ID_A_REQ, ssc::uds::ID_A_RESP, FW_VERSION, 0};
 static TaskHandle_t can_task_h;
@@ -59,9 +71,35 @@ static void send(uint8_t type, const uint8_t *p, uint8_t n) {
 }
 
 static void IRAM_ATTR on_can_int() {
+  int_us = micros();
   BaseType_t woken = pdFALSE;
   vTaskNotifyGiveFromISR(can_task_h, &woken);
   portYIELD_FROM_ISR(woken);
+}
+
+// v2.29: read RXB0 in ONE SPI transaction. READ RX BUFFER (0x90) returns SIDH..D7 and the chip clears RX0IF itself when CS goes
+// high, so the buffer is free ~25 us after the task starts instead of after the library's separate header read, data read and flag
+// clear. RTR is not decoded (the bench sends none); IDE/extended ids are, as the library does.
+static bool read_rxb0_fast(struct can_frame *f) {
+  uint8_t tx[14] = {0x90}, rx[14];
+  SPI.beginTransaction(SPISettings(CAN_SPI_HZ, MSBFIRST, SPI_MODE0));
+  digitalWrite(board::PIN_CAN_CS, LOW);
+  SPI.transferBytes(tx, rx, sizeof tx);
+  digitalWrite(board::PIN_CAN_CS, HIGH);
+  SPI.endTransaction();
+  uint8_t dlc = rx[5] & 0x0F;
+  if (dlc > 8) return false;
+  uint32_t id = ((uint32_t)rx[1] << 3) + (rx[2] >> 5);
+  if (rx[2] & 0x08) {   // extended frame
+    id = (id << 2) + (rx[2] & 0x03);
+    id = (id << 8) + rx[3];
+    id = (id << 8) + rx[4];
+    id |= CAN_EFF_FLAG;
+  }
+  f->can_id = id;
+  f->can_dlc = dlc;
+  memcpy(f->data, rx + 6, dlc);
+  return true;
 }
 
 // v2.9.4: receive from RXB0 only. At the instant a frame lands, the MCP2515 sometimes returns its flag register shifted
@@ -80,6 +118,7 @@ static void drain_rxb0() {
     if (!(intf & 0x01)) {
       if (intf & 0x02) {
         rx1_mismatch++;
+        win_mismatch++;
         last_stat = intf;
         if (board::mcp_read_reg(0x2C, CAN_SPI_HZ) & 0x02) {
           board::mcp_bitmod(0x2C, 0x02, 0x00, CAN_SPI_HZ);   // a real, persisting RX1IF: RXB1 is stale, drop it
@@ -89,7 +128,14 @@ static void drain_rxb0() {
       }
       return;
     }
-    if (mcp.readMessage(MCP2515::RXB0, &f) != MCP2515::ERROR_OK) return;
+    if (!read_rxb0_fast(&f)) return;
+    if (wake_us) {   // only the first frame of a wake has a meaningful interrupt stamp
+      uint32_t tc = micros() - wake_us;
+      wake_us = 0;
+      if (tc > win_clr) win_clr = tc;
+      if (tc > clr_max) clr_max = tc;
+      clr_hist[tc < 50 ? 0 : tc < 100 ? 1 : tc < 150 ? 2 : tc < 200 ? 3 : 4]++;
+    }
     if (xQueueSend(rxq, &f, 0) != pdTRUE) q_drops++;
     uds_answer(f);
     UBaseType_t used = QUEUE_LEN - uxQueueSpacesAvailable(rxq);
@@ -112,6 +158,13 @@ static void uds_answer(const struct can_frame &f) {
 }
 
 static void can_task(void *) {
+  // v2.29: install the GPIO interrupt FROM THIS TASK (core 0). On the ESP32 a GPIO interrupt is serviced on the core that installed it;
+  // from setup() that is core 1, which is busy with serial output and the kick pulses, so every frame's interrupt ran there and then had
+  // to wake a task on the other core. Measured before: 1 wake in ~500 000 took 441 us, longer than the ~230 us between B's two
+  // back-to-back frames, and the second frame found the single receive buffer still full.
+  can_task_h = xTaskGetCurrentTaskHandle();
+  pinMode(board::PIN_CAN_INT, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(board::PIN_CAN_INT), on_can_int, FALLING);
   uint32_t last_flags = 0, last_mode = 0;
   bool counting = false;
   for (;;) {
@@ -119,12 +172,26 @@ static void can_task(void *) {
     // once instead of waiting for an edge that cannot come
     // (at most 4 passes in a row, so a line held low by something else can't starve core 0's idle task)
     static int low_passes = 0;
+    uint32_t notified = 0;
     if (digitalRead(board::PIN_CAN_INT) == HIGH || ++low_passes > 4) {
       low_passes = 0;
-      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1));
+      notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1));
     }
+    uint32_t t0 = micros();
+    if (notified) {
+      uint32_t lat = t0 - int_us;
+      last_lat = lat;
+      if (lat > win_lat) win_lat = lat;
+      if (lat > lat_max) lat_max = lat;
+      lat_hist[lat < 50 ? 0 : lat < 100 ? 1 : lat < 230 ? 2 : lat < 1000 ? 3 : 4]++;
+    }
+    wake_us = notified ? int_us : t0;
     uint32_t now = millis();
     if (can_ok) drain_rxb0();
+    uint32_t dd = micros() - t0;
+    last_drain = dd;
+    if (dd > win_drain) win_drain = dd;
+    if (dd > drain_max) drain_max = dd;
     struct can_frame tx;
     while (can_ok && xQueueReceive(txq, &tx, 0) == pdTRUE) {   // frames the PC asked A to send ('T')
       mcp.sendMessage(&tx);
@@ -136,16 +203,30 @@ static void can_task(void *) {
       last_eflg = e;
       if (e & (MCP2515::EFLG_RX0OVR | MCP2515::EFLG_RX1OVR)) {
         // boot window (B already transmitting while A starts, before this task ran) is not counted: no scenario runs then
-        if (counting) overflows++;
+        if (counting) {
+          overflows++;
+          ovf_lat = win_lat;        // the worst wake / drain of the 2 ms window in which the overflow showed
+          ovf_drain = win_drain;
+          bool any = false;
+          if (win_lat >= 230) { ovf_by[0]++; any = true; }
+          if (win_clr >= 150) { ovf_by[1]++; any = true; }   // buffer was held >= 150 us after the interrupt
+          if (win_mismatch) { ovf_by[2]++; any = true; }
+          if (win_glitch) { ovf_by[3]++; any = true; }
+          if (!any) ovf_by[4]++;
+        }
         mcp.clearRXnOVR();
       }
       counting = true;
+      win_lat = win_drain = win_mismatch = win_glitch = win_clr = 0;   // next window
     }
     if (SSC_MODE_CHECK && can_started && now - last_mode >= 5) {
       last_mode = now;
       bool glitch;
       uint8_t om = board::mcp_opmode_confirmed(&glitch);
-      if (glitch) glitches++;
+      if (glitch) {
+        glitches++;
+        win_glitch++;
+      }
       if (om != 0) {
         bad_mode = om;
         reinits++;
@@ -174,8 +255,6 @@ void setup() {
   rxq = xQueueCreate(QUEUE_LEN, sizeof(struct can_frame));
   txq = xQueueCreate(8, sizeof(struct can_frame));
   xTaskCreatePinnedToCore(can_task, "can_rx", 4096, nullptr, configMAX_PRIORITIES - 2, &can_task_h, 0);
-  pinMode(board::PIN_CAN_INT, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(board::PIN_CAN_INT), on_can_int, FALLING);
 }
 
 void loop() {
@@ -225,11 +304,23 @@ void loop() {
     last_diag = now;
     uint32_t rx = rx_count, ov = overflows, dr = q_drops;
     uint16_t ri = reinits, gl = glitches, mm = rx1_mismatch, qh = q_high;
-    uint8_t d[31] = {(uint8_t)rx, (uint8_t)(rx >> 8), (uint8_t)(rx >> 16), (uint8_t)(rx >> 24), last_eflg,
+    uint32_t lh[5], lm = lat_max, dm = drain_max, ol = ovf_lat, od = ovf_drain;
+    for (int i = 0; i < 5; i++) lh[i] = lat_hist[i];
+    uint32_t ob[5];
+    for (int i = 0; i < 5; i++) ob[i] = ovf_by[i];
+    uint32_t ch[5], cm = clr_max;
+    for (int i = 0; i < 5; i++) ch[i] = clr_hist[i];
+    uint8_t d[111] = {(uint8_t)rx, (uint8_t)(rx >> 8), (uint8_t)(rx >> 16), (uint8_t)(rx >> 24), last_eflg,
                      (uint8_t)ov, (uint8_t)(ov >> 8), (uint8_t)(ov >> 16), (uint8_t)(ov >> 24),
                      bad_mode, (uint8_t)ri, (uint8_t)(ri >> 8), (uint8_t)gl, (uint8_t)(gl >> 8),
                      0, 0, (uint8_t)mm, (uint8_t)(mm >> 8), last_stat, 0, 0, 0, 0, 0, bukt,
                      (uint8_t)qh, (uint8_t)(qh >> 8), (uint8_t)dr, (uint8_t)(dr >> 8), (uint8_t)(dr >> 16), (uint8_t)(dr >> 24)};
+    // v2.29: after byte 30, little-endian u32 each: five latency buckets, max latency, max drain, latency and drain at the last overflow
+    uint32_t extra[9] = {lh[0], lh[1], lh[2], lh[3], lh[4], lm, dm, ol, od};
+    for (int i = 0; i < 9; i++) memcpy(d + 31 + 4 * i, &extra[i], 4);
+    for (int i = 0; i < 5; i++) memcpy(d + 67 + 4 * i, &ob[i], 4);   // overflows by coinciding cause (see ovf_by)
+    for (int i = 0; i < 5; i++) memcpy(d + 87 + 4 * i, &ch[i], 4);   // interrupt -> buffer free, five buckets, then the maximum
+    memcpy(d + 107, &cm, 4);
     send('D', d, sizeof d);
   }
 }

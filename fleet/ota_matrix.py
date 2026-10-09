@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import sys
 import time
 from collections.abc import Callable
@@ -39,7 +40,8 @@ class Dev:
     wait: Callable[[float], None]
     hard_reset: Callable[[], object]
     kind: str
-    arm_cut: Callable[[int], object] = lambda n: None   # emulated boards cut at the nth END write; a real board has the cut compiled into its image
+    arm_cut: Callable[[int], object] = lambda n: None
+    hello_s: float = 10.0   # how long to wait for a board's hello after a boot: over Wi-Fi the board must join the network and the broker first   # emulated boards cut at the nth END write; a real board has the cut compiled into its image
 
     def client(self, **kw: float) -> OtaClient:
         return OtaClient(self.link, **kw)
@@ -59,14 +61,33 @@ def real(port: str) -> Dev:
     return Dev(f"B@{port}", link, time.sleep, hard_reset, "real")
 
 
-def over_mqtt(dev: Dev, port: int) -> tuple[Dev, Callable[[], None]]:
-    """The same board, reached through the broker: a Gateway in front of it, an MqttLink for the client. Returns (device, cleanup)."""
+def over_mqtt(dev: Dev, port: int, *, wifi: bool = False, user: str | None = None, password: str | None = None,
+              device: str | None = None) -> tuple[Dev, Callable[[], None]]:
+    """The same board, reached through the broker. Returns (device, cleanup).
+
+    Default: a Gateway on this PC in front of the board, an MqttLink for the client (the board has no radio of its own).
+    `wifi=True`, emulated: the Gateway says hello once subscribed, like the real board does, with a login on the broker. It stands in for
+        a board that is on the network itself, so the --wifi code path runs in CI.
+    `wifi=True`, real: NO gateway. The board is on the network, the client talks to it through the broker; only the EN-pin reset (test
+        infrastructure, not part of the update) stays on the USB cable."""
     from .mqtt_link import Gateway, MqttLink
-    gw = Gateway(dev.name, dev.link, port)
-    link = MqttLink(dev.name, port)
-    wait = link.advance if dev.kind == "emulated" else time.sleep
-    arm = (lambda n: link.control(f"cut {n}")) if dev.kind == "emulated" else (lambda n: None)
-    wrapped = Dev(dev.name, link, wait, lambda: link.reset_board(), f"{dev.kind}+mqtt", arm)
+    device = device or dev.name
+    emu = dev.kind == "emulated"
+    if wifi and not emu:
+        link = MqttLink(device, port, user=user, password=password, reset_hook=dev.hard_reset)
+        wrapped = Dev(device, link, time.sleep, dev.hard_reset, "real+wifi", lambda n: None, hello_s=45.0)
+
+        def cleanup_wifi() -> None:
+            link.close()
+            close = getattr(dev.link, "close", None)
+            if close:
+                close()
+        return wrapped, cleanup_wifi
+    gw = Gateway(device, dev.link, port, user=user, password=password, hello_on_connect=wifi)
+    link = MqttLink(device, port, user=user, password=password)
+    wait = link.advance if emu else time.sleep
+    arm = (lambda n: link.control(f"cut {n}")) if emu else (lambda n: None)
+    wrapped = Dev(device, link, wait, lambda: link.reset_board(), f"{dev.kind}+{'wifi' if wifi else 'mqtt'}", arm)
 
     def cleanup() -> None:
         link.close()
@@ -127,7 +148,7 @@ def _version_of(hello: str) -> str:
 
 def _boot_back(dev: Dev, c: OtaClient) -> str:
     """The hello that follows the last reboot / reset (callers clear the old one first with `again`)."""
-    return c.wait_for_hello(10.0) or ""
+    return c.wait_for_hello(dev.hello_s) or ""
 
 
 def again(dev: Dev, c: OtaClient, how: str) -> None:
@@ -137,7 +158,7 @@ def again(dev: Dev, c: OtaClient, how: str) -> None:
     else:
         c.forget_hello()
         dev.hard_reset()
-    if dev.kind == "real":
+    if dev.kind.startswith("real"):
         time.sleep(0.4)   # the old image may still say hello for a moment
         c.forget_hello()
 
@@ -207,15 +228,28 @@ def run_all(dev: Dev, imgs: dict[str, SignedImage]) -> list[dict]:
 
     # REL-07 a reset (power loss) during the trial boot, before the image confirmed itself
     c.push(imgs["2.14"])
-    again(dev, c, "reboot")
-    h1 = _boot_back(dev, c)
-    dev.wait(1.0)
-    again(dev, c, "reset")
-    h2 = _boot_back(dev, c)
-    dev.wait(3.6)
-    s = c.status()
-    row("REL-07", "A reset during the trial boot rolls back to the old image, in its safe state", _version_of(h1) == "2.14" and _version_of(h2) == "2.12" and safe(h2) and s["state"] == "ROLLED_BACK",
-        f"trial {h1[:30]} -> after reset {h2[:30]}; {s['last']}")
+    if dev.kind.endswith("+wifi"):
+        # The trial hello comes over the network, after the radio is up: later than the 3 s probation. So the reset is timed from the
+        # reboot command, on the cable, and the proof is the same: the second boot is the OLD image and the state says ROLLED_BACK.
+        c.forget_hello()
+        c.reboot()
+        time.sleep(1.2) if dev.kind.startswith("real") else dev.wait(1.2)
+        again(dev, c, "reset")
+        h1, h2 = "(not observable over Wi-Fi inside the 3 s probation)", _boot_back(dev, c)
+        dev.wait(3.6)
+        s = c.status()
+        row("REL-07", "A reset during the trial boot rolls back to the old image, in its safe state", _version_of(h2) == "2.12" and safe(h2) and s["state"] == "ROLLED_BACK" and "reset before" in s["last"],
+            f"trial {h1} -> after reset {h2[:30]}; {s['last']}")
+    else:
+        again(dev, c, "reboot")
+        h1 = _boot_back(dev, c)
+        dev.wait(1.0)
+        again(dev, c, "reset")
+        h2 = _boot_back(dev, c)
+        dev.wait(3.6)
+        s = c.status()
+        row("REL-07", "A reset during the trial boot rolls back to the old image, in its safe state", _version_of(h1) == "2.14" and _version_of(h2) == "2.12" and safe(h2) and s["state"] == "ROLLED_BACK",
+            f"trial {h1[:30]} -> after reset {h2[:30]}; {s['last']}")
 
     # REL-08 a reset after the image was staged but before the reboot command: the new image boots in trial and commits
     c.push(imgs["2.15"])
@@ -230,7 +264,7 @@ def run_all(dev: Dev, imgs: dict[str, SignedImage]) -> list[dict]:
     row("REL-09", "An older version is refused (anti-rollback)", r.status == "DOWNGRADE", f"{r.status}; still running {_version_of(h)}")
 
     # REL-10 a trial image never loses the safe state: every hello in this run said "restored"
-    row("REL-10", "The board came back in its latched safe state after every boot", all("restored" in x for x in (start_hello, hello, hello6, h1, h2, h)), "all hellos say restored")
+    row("REL-10", "The board came back in its latched safe state after every boot", all("restored" in x for x in (start_hello, hello, hello6, h1, h2, h) if not x.startswith("(")), "all hellos say restored")
     return rows
 
 
@@ -271,7 +305,7 @@ def run_cut_windows(dev: Dev, imgs: dict[str, SignedImage]) -> list[dict]:
             return False, f"push {key}: {r.outcome} {r.status}"
         c.forget_hello()
         c.reboot()
-        hello = c.wait_for_hello(10.0) or ""
+        hello = c.wait_for_hello(dev.hello_s) or ""
         dev.wait(3.6)
         st = c.status()
         ok = _version_of(hello) == imgs[key].version and "restored" in hello and st["state"] == "NONE"
@@ -307,6 +341,8 @@ def main() -> int:
     g.add_argument("--build-images", action="store_true", help="compile the four images the --real sequence needs, then stop")
     g.add_argument("--build-cut-images", action="store_true", help="compile the seven images of the --cut-windows sequence, then stop")
     ap.add_argument("--cut-windows", action="store_true", help="run REL-11 / REL-12 (power lost at each final write of an update) instead of REL-01..10")
+    ap.add_argument("--wifi", action="store_true", help="the board is on the network itself (provision it first: scripts/provision_wifi.py): "
+                    "this PC runs a login-protected broker on the LAN and the update traffic goes over Wi-Fi. With --emulated, a stand-in board.")
     ap.add_argument("--mqtt", action="store_true", help="reach the board through a local MQTT broker and a gateway instead of the direct link")
     a = ap.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
@@ -325,7 +361,38 @@ def main() -> int:
         dev, imgs, where = (emulated(), images_emulated(), "emulated") if a.emulated else (real(a.real), images_real(), f"real board {a.real}")
     cleanup: Callable[[], None] = lambda: None   # noqa: E731
     broker = None
-    if a.mqtt:
+    if a.wifi:
+        import tempfile
+
+        from . import broker as brk
+        from .mqtt_link import LocalBroker
+        if a.emulated:   # a throw-away login: the real path (password file, refused logins) is exercised, no secret exists
+            tmp = Path(tempfile.mkdtemp()) / "passwd"
+            user, password, device = "ssb-test", "test-password-" + str(time.time_ns()), "board-b"
+            brk.write_login(tmp, user, password)
+            broker = LocalBroker(password_file=str(tmp)).start()
+            where += " over Wi-Fi stand-in (login-protected broker)"
+        else:
+            import getpass
+            user = os.environ.get("SSB_MQTT_USER", "ssb")
+            password = os.environ.get("SSB_MQTT_PASS", "")
+            if not brk.DEFAULT_FILE.exists():
+                raise SystemExit("--wifi needs the broker login: run `python -m fleet.broker login` first")
+            if not password:
+                if not sys.stdin.isatty():
+                    raise SystemExit("SSB_MQTT_PASS is not set and there is no terminal to ask on")
+                password = getpass.getpass(f"broker password for '{user}' (hidden; the one you gave `fleet.broker login`): ")
+            from .provision import Provisioner, describe
+            info = Provisioner(dev.link).info()
+            print(describe(info))
+            if not info.provisioned:
+                raise SystemExit("board B has no network settings: run scripts/provision_wifi.py --port " + a.real)
+            device = info.device
+            broker = LocalBroker(port=int(os.environ.get("SSB_MQTT_PORT", str(brk.DEFAULT_PORT))), bind="0.0.0.0", password_file=str(brk.DEFAULT_FILE)).start()
+            print(f"broker up for the LAN on port {broker.port}; the board must reach {', '.join(brk.lan_addresses())}")
+            where += " over its own Wi-Fi radio (login-protected broker on this PC)"
+        dev, cleanup = over_mqtt(dev, broker.port, wifi=True, user=user, password=password, device=device)
+    elif a.mqtt:
         from .mqtt_link import LocalBroker
         broker = LocalBroker().start()
         dev, cleanup = over_mqtt(dev, broker.port)
@@ -337,7 +404,7 @@ def main() -> int:
         if broker:
             broker.stop()
     OUT.mkdir(parents=True, exist_ok=True)
-    tag = ("emulated" if a.emulated else "real") + ("_mqtt" if a.mqtt else "")
+    tag = ("emulated" if a.emulated else "real") + ("_wifi" if a.wifi else "_mqtt" if a.mqtt else "")
     stem = "ota_cut" if a.cut_windows else "ota_matrix"
     (OUT / f"{stem}_{tag}.json").write_text(json.dumps(rows, indent=1), encoding="utf-8")
     text = render(rows, where)

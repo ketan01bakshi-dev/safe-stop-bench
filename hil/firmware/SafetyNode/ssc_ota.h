@@ -43,13 +43,18 @@ static uint8_t want_sha[32], want_hmac[32];
 static char want_ver[17];
 static mbedtls_sha256_context sha_ctx;
 
+// Where answers go. Null = the USB link; the network glue sets it while it handles a message that came in over MQTT (v2.28).
+typedef void (*Sink)(const uint8_t *, size_t);
+static Sink sink = nullptr;
+
 static void reply(uint8_t op, uint8_t status, const uint8_t *extra = nullptr, uint8_t n = 0) {
   uint8_t p[64] = {op, status};
   if (n > 60) n = 60;
   if (n) memcpy(p + 2, extra, n);
   uint8_t buf[80];
   size_t k = ssc::frame_msg('u', p, (uint8_t)(2 + n), buf);
-  Serial.write(buf, k);
+  if (sink) sink(buf, k);
+  else Serial.write(buf, k);
 }
 static void put32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
 static uint32_t get32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
@@ -253,7 +258,7 @@ static void handle(const uint8_t *p, uint8_t n, bool node_active, const char *ru
       if (!staged) return reply(REBOOT, NOT_STAGED);
       reply(REBOOT, OK);
       Serial.flush();
-      delay(100);
+      delay(sink ? 400 : 100);   // a network answer is only queued: give the MQTT task time to put it on the wire
       ESP.restart();
       return;
     case STATUS: {

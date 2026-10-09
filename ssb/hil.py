@@ -232,6 +232,7 @@ class LinkDUT(BlackBoxObserver, DeviceUnderTest):
         self.n_status = self.n_act = 0
         self.last_status_t = 0
         self.a_reinits0 = self.diag_a.get("reinits", 0)
+        self.a_base: tuple[int, int] | None = None   # (frames, overflows) at A's first report of this run; board A's counters run since ITS boot
         self.mirror: list[list] = []    # B's own USB copy of each SAF_Status it sent: [t, bytes, used]
         self.n_replay = 0
         self.status_rx = StatusReceiver()   # SAF_Status E2E receiver (v2.9.6; shared with the CAN-process bench, v2.10)
@@ -296,9 +297,24 @@ class LinkDUT(BlackBoxObserver, DeviceUnderTest):
                 self.diag_a = {"rx": struct.unpack_from("<I", p)[0], "eflg": p[4], "rx_overflow": struct.unpack_from("<I", p, 5)[0],
                                "bad_mode": p[9], "reinits": p[10] | p[11] << 8,
                                "spi_glitches": p[12] | p[13] << 8 if len(p) >= 14 else None}
+                if self.a_base is None:
+                    self.a_base = (self.diag_a["rx"], self.diag_a["rx_overflow"])
+                # v2.29: the counters above are cumulative since A booted (hours of traffic), which made a handful of rare overflows look like
+                # a problem of the run that happened to print them. These two are this run's own.
+                self.diag_a["rx_run"] = self.diag_a["rx"] - self.a_base[0]
+                self.diag_a["rx_overflow_run"] = self.diag_a["rx_overflow"] - self.a_base[1]
                 if len(p) >= 31:   # BusNode 2.6: the RAM queue between the CAN task and USB
                     self.diag_a["queue_high"] = p[25] | p[26] << 8
                     self.diag_a["queue_drops"] = struct.unpack_from("<I", p, 27)[0]
+                if len(p) >= 67:   # BusNode 2.9: how fast the CAN task reacts (us): wake latency buckets < 50 / < 100 / < 230 / < 1000 / >= 1000
+                    v = struct.unpack_from("<9I", p, 31)
+                    self.diag_a["lat_hist"], self.diag_a["lat_max_us"] = list(v[:5]), v[5]
+                    self.diag_a["drain_max_us"], self.diag_a["ovf_lat_us"], self.diag_a["ovf_drain_us"] = v[6], v[7], v[8]
+                if len(p) >= 87:   # BusNode 2.11: overflows by what coincided with them: slow wake / long drain / RXB1 misread / SPI glitch / nothing
+                    self.diag_a["ovf_by"] = list(struct.unpack_from("<5I", p, 67))
+                if len(p) >= 111:   # BusNode 2.12: interrupt -> receive buffer free (us): < 50 / < 100 / < 150 / < 200 / >= 200, and the maximum
+                    self.diag_a["clr_hist"] = list(struct.unpack_from("<5I", p, 87))
+                    self.diag_a["clr_max_us"] = struct.unpack_from("<I", p, 107)[0]
         # SAF_Status in arrival order: used once B's USB copy vouches for it; one with no copy within 20 ms of its arrival
         # is a replay. Usually the copy is already here (0-2 ms ahead); if B's port is read late, the frame waits.
         while self.pend:

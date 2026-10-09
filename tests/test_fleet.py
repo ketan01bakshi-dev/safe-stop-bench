@@ -297,7 +297,7 @@ class TraceabilityTests(unittest.TestCase):
         from ssb import campaigns
         reqs = campaigns.requirements()["requirements"]
         ids = re.findall(r'(?:row\(|"id": )"(REL-\d+)"', (ROOT / "fleet" / "ota_matrix.py").read_text(encoding="utf-8"))
-        self.assertEqual(len(ids), len(set(ids)))
+        ids = sorted(set(ids))   # REL-07 has two branches (USB, Wi-Fi) that record the same requirement
         for rid in ids:
             self.assertIn(rid, reqs, f"{rid} is run by fleet.ota_matrix but is not in safety/hazards.json")
             self.assertEqual(reqs[rid]["goal"], "SG9")
@@ -341,6 +341,14 @@ class ReleaseTests(unittest.TestCase):
         d = release.decide(evidence(ota_cut_real=[{"id": "REL-11", "title": "cut", "ok": False}]))
         self.assertEqual(d.verdict, "NO GO")
         self.assertTrue(any("cut real" in b for b in d.blocking), d.blocking)
+
+    def test_a_failing_wifi_scenario_is_a_no_go_and_the_limit_names_the_missing_tls(self):
+        d = release.decide(evidence(ota_wifi_real=[{"id": "REL-05", "title": "resume", "ok": False}]))
+        self.assertEqual(d.verdict, "NO GO")
+        self.assertTrue(any("wifi real" in x for x in d.blocking), d.blocking)
+        wifi = release.limits(evidence(ota_wifi_real=[{"id": "REL-01", "title": "t", "ok": True}]))[0]
+        self.assertIn("no TLS", wifi[0])
+        self.assertIn("TLS", wifi[2])
 
     def test_the_transport_limit_follows_the_evidence(self):
         usb = release.limits(evidence())[0][0]

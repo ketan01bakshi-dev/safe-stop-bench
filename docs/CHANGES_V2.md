@@ -386,6 +386,42 @@ Lessons 1–4 matter for any PC-based vECU test setup, not only this one.
 - **Test the test:** after the bench run the same cases run on the clean reference controller; a case that fails there is `SUSPECT`, listed under "Suspect cases (not filed as defects)" with the drafter's own assumptions, and kept out of the defect drafts. Re-run of SR-02 with the same Sonnet draft: nothing filed. A real seeded bug (`e2e_lenient`) is still filed, without the suspect case in it.
 - **Tests (113):** the GitHub tracker against a fake API, a campaign filing to it and commenting on the rerun, the bad-repo guard, the suspect-case logic on the exact failing draft.
 
+## v2.29: board A's receive overflows, investigated (9 Oct 2026)
+
+**Question:** board A's overflow counter read 28 to 29 after a short HiL run, against "0" in the v2.9.8 write-up. **Answer, in short: the rate is a steady ~5 per million frames; it was not caused by the Wi-Fi code; the old "0" was a sample too small to see it; the receive path had thin margin and now has more; about half the remaining events are still unexplained.**
+
+| Measured | Result |
+|---|---|
+| Fresh board A, 14 scenarios incl. floods, fuzzing, replays (~50 000 frames) | 0 overflows |
+| Idle, 10 resets of B, an OTA update of B, A's port opened and closed 9 times | 0 caused by any of these |
+| Previous firmware on B (control run) vs the Wi-Fi firmware | the same readings, so not the radio |
+| 5 samples of 324 000 to 601 000 frames of `nominal_with_noise` | 15 overflows in 2.3 million frames, **6.6 per million**, never more than 1 to 2 per 12 000-frame run |
+| The v2.9.8 claim ("0 in 3 x 60 s") | about 36 000 to 260 000 frames: at this rate the expectation is 0.2 to 1.7, so "0" was luck, not proof |
+
+**Why the counter looked bad:** it is cumulative since A booted (hours of traffic, 4 million frames), and the bench printed it as if it belonged to the run. The bench now also reports this run's own `rx_run` / `rx_overflow_run`.
+
+**What the instrumentation (BusNode 2.9 to 2.12) found:**
+1. B sends frames back to back, ~222 us each at 500 kbit/s, and the MCP2515 has one receive buffer (rollover is off since v2.9.4), so the buffer must be free within ~220 us of the interrupt.
+2. Wake latency is mostly under 50 us, but 4 percent of wakes are 100 to 230 us (the task still busy with the previous frame) and about 1 per 500 000 takes **370 to 520 us**. Those coincide with some overflows.
+3. **Two real margin fixes, kept:** (a) the CAN interrupt was installed from `setup()`, which runs on core 1, so every frame's interrupt was serviced on the busy core and had to wake a task on core 0; it is now installed from the CAN task itself. (b) The receive buffer was read in several separate SPI transactions; it is now one `READ RX BUFFER` (0x90) which also clears the flag. **Interrupt to buffer-free: never above 93 us over 601 000 frames** (587 000 of them between 50 and 100 us); the drain alone used to reach 190 to 314 us.
+4. **The overflow rate did not measurably change** (3 in 601 000 frames afterwards, vs 6.6 per million before), and in the final run **two of the three had nothing wrong in their 2 ms window**: no slow wake, no long hold of the buffer, no misread, no SPI glitch. So the dominant remaining cause is **not task timing**, and it is **not identified**. Candidates not yet tested: a retransmitted frame from B (an error on the last EOF bit makes the sender repeat a frame the receivers already accepted), SPI signal quality on the jumper wires, and the second frame of a pair arriving while RX0IF is being cleared.
+
+**Effect on the bench:** A is the observer and relay; an overflow drops one observed frame. Every scenario still passes (no run has failed because of it) and the E2E layer tolerates a lone lost frame. It is a measurement-quality item to watch, not a safety finding on B.
+
+Changes: BusNode 2.12 (instrumented, ISR on core 0, one-transaction read), `scripts/overflow_by_scenario.py`, `scripts/overflow_watch.py`, per-run counters in `ssb/hil.py`, inventory BusNode 2.12.
+
+## v2.28: the board's own Wi-Fi radio (9 Oct 2026)
+
+- **Firmware (`ssc_net.h`, SafetyNode):** Wi-Fi station + the ESP-IDF MQTT client (shipped with the Arduino core, no library added). The network name, passwords, broker address and board id are **provisioned over USB into the board's flash**, never compiled in, so the signed images carry no secret. Nothing provisioned: the radio never starts. The radio is **off while a scenario runs** and back 2 s after; credentials are accepted over USB only; INFO never returns a password. The OTA module answers over MQTT for messages that arrived over MQTT (`ota::sink`).
+- **PC side:** `fleet/provision.py` + `scripts/provision_wifi.py` (reads secrets from the environment or a hidden prompt, never prints, stores or logs them; refuses what the board would refuse before sending), `fleet/broker.py` (`login` stores an argon2 hash only, `serve` listens on the LAN with that login, `addresses`), `LocalBroker` with login, `MqttLink`/`Gateway` with login, a clear error for a refused login (it used to be silence), hello-on-connect and a reset hook.
+- **`python -m fleet.ota_matrix --real COM13 --wifi`:** REL-01..10 with the update traffic on Wi-Fi; the EN-pin reset stays on the cable. REL-07 is timed from the reboot command (the trial hello arrives after the 3 s probation over Wi-Fi). `--emulated --wifi` runs the path against a stand-in board with a login-protected broker: 10/10, and it runs in CI.
+- **On the real board, without a network (fake test settings):** provisioning and INFO round trip; the radio retrying does not disturb the board; a USB update still **commits** with the radio active (the health check needs free heap); 3 of 3 HiL scenarios pass with the network provisioned (detection 99 / 102 ms as before). **Not run: the real Wi-Fi network**, which needs your credentials (`docs/WIFI_SETUP.md`).
+- **Re-run on the real board with the network firmware:** REL-01..10 **10/10** over USB and **10/10** through the PC gateway, both rollouts as before, REL-11/12 **2/2** (about 5150 chunks per push). Board B was left on the 2.10 baseline with nothing provisioned.
+- **A question asked and answered:** board A's receive-overflow counter reads 28 to 29 on a short HiL run (it is cumulative since A last booted: `rx` keeps climbing across runs). A control run with the previous firmware on B gave the same 28 / 29, so the radio code did not cause it; whether it was already there since v2.23 was not recorded earlier. Worth a look on its own: the v2.9.8 write-up says 0.
+- **Cost, stated:** the firmware grew from about 350 KB to about 1 MB (78 % of the 1.25 MB slot): a push is about 5150 chunks, and there is little room left. Plain MQTT, no TLS, one shared login: the release decision's standing limit says so once a Wi-Fi result exists.
+- **Secrets hygiene:** `secrets/`, `*.passwd`, `broker_passwd`, `wifi_secrets*.h`, `.env.wifi` are git-ignored; tests fail if a tracked file assigns a literal password to `SSB_*_PASS`, if firmware contains `WiFi.begin("...")`, or if the provisioning script prints or stores what it is given.
+- Docs: **`docs/WIFI_SETUP.md`** (step by step), `docs/FLEET_OTA.md` §9. **Tests (236 after v2.29):** provisioning against the emulated board, the firmware contract (buffer sizes, ops, USB-only credentials, radio off during a run), broker login, the --wifi path behind a login, secrets hygiene.
+
 ## v2.27: P4 gaps: OTA through an MQTT broker, and a power loss inside an update (9 Oct 2026)
 
 - **A defect in the v2.26 update path, found by cutting power inside it.** `END` made the boot-slot switch first and the probation record second, and wrote the state flag before the slot it points at. A cut between the switch and the record boots the new image with **no probation** (an unhealthy image is never rolled back); a cut between the state flag and `prev` leaves TRIAL with no slot, so the rollback **switches nothing**. Fixed in `ssc_ota.h`: record first with the state flag last, switch after, and `boot_check()` discards a record whose slot never switched. Hardware flashed with the fix; every image rebuilt from the fixed source.

@@ -22,9 +22,12 @@ import logging
 import socket
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 import paho.mqtt.client as mqtt
+
+from ssb.hil import frame_msg
 
 for _name in ("amqtt", "transitions", "asyncio"):
     logging.getLogger(_name).setLevel(logging.CRITICAL)
@@ -39,17 +42,22 @@ def free_port() -> int:
 
 
 class LocalBroker:
-    """An amqtt broker in a background thread (the same stand-in the fleet bench used for the cloud broker)."""
+    """An amqtt broker in a background thread (the same stand-in the fleet bench used for the cloud broker).
 
-    def __init__(self, port: int | None = None):
+    `bind` 127.0.0.1 keeps it on this PC; 0.0.0.0 lets a board on the LAN connect. With a `password_file` (user:hash lines, made by
+    `python -m fleet.broker login`) a client must log in; without one the broker is anonymous, which is only for 127.0.0.1."""
+
+    def __init__(self, port: int | None = None, bind: str = "127.0.0.1", password_file: str | None = None):
         self.port = port or free_port()
+        self.bind, self.password_file = bind, password_file
         self.loop: asyncio.AbstractEventLoop | None = None
         self._broker: Any = None
 
     def start(self) -> LocalBroker:
         from amqtt.broker import Broker
-        config = {"listeners": {"default": {"type": "tcp", "bind": f"127.0.0.1:{self.port}"}},
-                  "plugins": {"amqtt.plugins.authentication.AnonymousAuthPlugin": {"allow_anonymous": True}}}
+        auth: dict = ({"amqtt.plugins.authentication.FileAuthPlugin": {"password_file": str(self.password_file)}} if self.password_file
+                      else {"amqtt.plugins.authentication.AnonymousAuthPlugin": {"allow_anonymous": True}})
+        config = {"listeners": {"default": {"type": "tcp", "bind": f"{self.bind}:{self.port}"}}, "plugins": auth}
         loop = self.loop = asyncio.new_event_loop()
         ready = threading.Event()
 
@@ -86,10 +94,30 @@ def topic(device: str, leaf: str) -> str:
     return f"ssb/ota/{device}/{leaf}"
 
 
-def _client(port: int, host: str) -> mqtt.Client:
+class BrokerRefused(RuntimeError):
+    pass
+
+
+def _client(port: int, host: str, user: str | None = None, password: str | None = None) -> mqtt.Client:
     c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    if user:
+        c.username_pw_set(user, password)
+    outcome: list = []
+    done = threading.Event()
+
+    def on_connect(_c, _u, _flags, reason_code, _props=None) -> None:
+        outcome.append(reason_code)
+        done.set()
+
+    c.on_connect = on_connect
     c.connect(host, port, keepalive=30)
     c.loop_start()
+    if not done.wait(8.0):
+        c.loop_stop()
+        raise BrokerRefused(f"the broker at {host}:{port} did not answer the connect")
+    if outcome[0].is_failure:
+        c.loop_stop()
+        raise BrokerRefused(f"the broker at {host}:{port} refused the login ({outcome[0]})")
     return c
 
 
@@ -117,14 +145,16 @@ def _wait_subscribed(c: mqtt.Client, subs: list[str], timeout_s: float = 5.0) ->
 class MqttLink:
     """The PC side. Looks like a serial link to OtaClient."""
 
-    def __init__(self, device: str, port: int, host: str = "127.0.0.1"):
+    def __init__(self, device: str, port: int, host: str = "127.0.0.1", user: str | None = None, password: str | None = None,
+                 reset_hook: Callable[[], object] | None = None):
         self.device = device
+        self.reset_hook = reset_hook   # when the board's update traffic is on the network, its reset still has to come over the cable
         self._buf = bytearray()
         self._lock = threading.Lock()
         self._ack: str | None = None
         self._ack_evt = threading.Event()
         self.published = 0
-        self.c = _client(port, host)
+        self.c = _client(port, host, user, password)
         self.c.on_message = self._on_message
         _wait_subscribed(self.c, [topic(device, "from_board"), topic(device, "ctl_ack")])
 
@@ -153,6 +183,9 @@ class MqttLink:
         return self._ack_evt.wait(timeout_s) and self._ack == "ok"
 
     def reset_board(self) -> bool:
+        if self.reset_hook is not None:
+            self.reset_hook()
+            return True
         return self.control("reset")
 
     def advance(self, seconds: float) -> None:
@@ -166,16 +199,25 @@ class MqttLink:
 class Gateway:
     """Puts one board behind the broker. `target` is an EmuBoard or a SerialLink (anything with write / read / reset_board)."""
 
-    def __init__(self, device: str, target: Any, port: int, host: str = "127.0.0.1", poll_s: float = 0.005):
+    def __init__(self, device: str, target: Any, port: int, host: str = "127.0.0.1", poll_s: float = 0.005,
+                 user: str | None = None, password: str | None = None, hello_on_connect: bool = False):
+        """`hello_on_connect`: say hello once subscribed, as the real board does (ssc_net.h). With it the gateway is a stand-in for a
+        board that is on the network itself, and the matrix's --wifi path can be exercised without hardware."""
         self.device, self.target, self.poll_s = device, target, poll_s
         self.lock = threading.Lock()
         self._stop = threading.Event()
         self.forwarded = 0
-        self.c = _client(port, host)
+        self.c = _client(port, host, user, password)
         self.c.on_message = self._on_message
         _wait_subscribed(self.c, [topic(device, "to_board"), topic(device, "ctl")])
+        if hello_on_connect:
+            self._publish_hello()
         self._pump = threading.Thread(target=self._pump_loop, name=f"gw-{device}", daemon=True)
         self._pump.start()
+
+    def _publish_hello(self) -> None:
+        text = self.target.hello_text()
+        self.c.publish(topic(self.device, "from_board"), frame_msg("H", text.encode()), qos=1)
 
     def _publish_board_output(self) -> None:
         with self.lock:

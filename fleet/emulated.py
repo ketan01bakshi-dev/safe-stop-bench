@@ -48,6 +48,7 @@ class EmuBoard:
         self.running = self.boot_slot = 0   # boot_slot = what the bootloader will start next (the firmware switches it at END)
         self.st, self.tries, self.last = NONE, 0, ""
         self.prev: int | None = None   # the slot to roll back to; None = not recorded (address 0 in the firmware: no such slot)
+        self.net: dict = {}            # what scripts/provision_wifi.py stored (ssc_net.h: NVS namespace "net"); passwords stay here, never in a reply
         self.legacy_ota = False        # reproduce the first END order (see END_WRITES_LEGACY) to show what the cut-window test catches
         self.cut_end_after: int | None = None   # lose power right after the Nth persistent write of the next END
         self.parser, self.out = Parser(), bytearray()
@@ -65,6 +66,8 @@ class EmuBoard:
                 self.pc_session = True
             elif kind == "U":
                 self._handle(bytes(p))
+            elif kind == "N":
+                self._net_msg(bytes(p))
 
     def read(self) -> bytes:
         out, self.out = bytes(self.out), bytearray()
@@ -148,6 +151,40 @@ class EmuBoard:
             self.st = TRIAL
         else:
             self.boot_slot = spare
+
+    def hello_text(self) -> str:
+        return f"SafetyNode {self.version} (B) CAN 8MHz restored"
+
+    def _net_msg(self, p: bytes) -> None:
+        """'N' <op> ...: SET / CLEAR / INFO, as ssc_net.h. Replies are 'n' <op> <status> ...; a password is never sent back."""
+        def rep(op: int, status: int, extra: bytes = b"") -> None:
+            self.out += frame_msg("n", bytes([op, status]) + extra)
+        if not p:
+            return rep(0, 1)
+        if p[0] == 1:
+            if len(p) < 9:
+                return rep(1, 1)
+            port, rest = struct.unpack("<H", p[1:3])[0], p[3:]
+            parts = rest.split(b"\0")
+            caps = (33, 64, 65, 33, 65, 17)
+            if len(parts) < 7 or parts[6] != b"":   # six strings, each NUL-terminated, nothing after the last NUL
+                return rep(1, 2)
+            if any(len(x) + 1 > c for x, c in zip(parts[:6], caps, strict=True)):
+                return rep(1, 2)
+            ssid, wpass, host, user, mpass, dev = (x.decode() for x in parts[:6])
+            if not ssid or not host or not dev or not port:
+                return rep(1, 1)
+            self.net = {"ssid": ssid, "wpass": wpass, "host": host, "user": user, "mpass": mpass, "dev": dev, "port": port}
+            return rep(1, 0)
+        if p[0] == 2:
+            self.net = {}
+            return rep(2, 0)
+        if p[0] == 3:
+            n = self.net
+            flags = 1 if n else 0
+            body = b"\0".join(x.encode() for x in (n.get("ssid", ""), "", n.get("host", ""), n.get("dev", "")))
+            return rep(3, 0, bytes([flags, 0]) + body)
+        return rep(p[0], 1)
 
     def _reply(self, op: int, status: int, extra: bytes = b"") -> None:
         self.out += frame_msg("u", bytes([op, status]) + extra)

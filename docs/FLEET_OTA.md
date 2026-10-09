@@ -86,7 +86,7 @@ next; after every reboot or reset the hello must say "restored".
 | REL-10 | every boot in the sequence came up with the safe state restored |
 
 Results: **10/10 emulated, 10/10 on the real board** (`reports/fleet/ota_matrix_emulated.md`, `ota_matrix_real.md`).
-Board B now runs the OTA-delivered SafetyNode 2.50 (the end of the REL-11 sequence), and the preflight reads that version back **over UDS**
+Board B ends the REL-11 sequence on an OTA-delivered release image (2.50) and is then cable-flashed back to the 2.10 baseline; the preflight reads that version back **over UDS**
 (`board_b: v2.50 serial 91F61B44`), not only from the firmware hello — so the release report's firmware line is diagnostic
 evidence, not the image's own claim.
 
@@ -164,7 +164,29 @@ it does not show a *torn* single write or the supply ramp.
 | Fixed firmware, real board and emulation | the unhealthy 2.40 never runs; the board reports its safe state restored; cut 4 reads "update not completed"; cut 5 reads ROLLED_BACK | goes through at every cut point, ends on a plain release image (2.50) |
 | First order (emulation only) | cut 1 leaves the unhealthy image running | not reached |
 
-## 9. Telemetry (`fleet/telemetry.py`)
+## 9. The board's own Wi-Fi radio (`ssc_net.h`, v2.28)
+
+Board B can now take the same OTA messages over your Wi-Fi: the board is the MQTT client, this PC runs a login-protected broker
+on the LAN, and the PC-side client is unchanged (`ssb/ota/<id>/to_board` in, `from_board` out, the same topics the gateway used).
+Set-up, credentials and troubleshooting: **`docs/WIFI_SETUP.md`**.
+
+- **Credentials live in the board's flash, not in the firmware.** `scripts/provision_wifi.py` sends them over USB (`'N'` messages
+  SET / CLEAR / INFO); no secret is compiled into the signed images that are copied to every board. INFO never returns a password.
+  Provisioning is accepted over USB only, never over the network it configures.
+- **The radio is a guest on a safety controller.** Nothing provisioned means it never starts. It is off while a scenario runs
+  and returns 2 s after, it runs in its own tasks (Wi-Fi, esp-mqtt), and the 10 ms loop only pops a queue.
+- **The broker** (`python -m fleet.broker login | serve`) takes a user and password you choose; the file holds an argon2 hash.
+- **`python -m fleet.ota_matrix --real COM13 --wifi`** runs REL-01..10 with the update traffic on Wi-Fi. The EN-pin reset stays on
+  the cable (test equipment). REL-07 is timed from the reboot command, because over Wi-Fi the trial hello arrives after the 3 s
+  probation; its proof is unchanged: the second boot is the old image and the state says ROLLED_BACK.
+  `--emulated --wifi` runs the same code path against a stand-in board with a login-protected broker (CI).
+- **Cost:** the firmware grew from about 350 KB to about 1 MB (78 % of the 1.25 MB slot), so a push is about 5150 chunks.
+
+Verified on the real board without a network: provisioning, INFO, a USB update that still **commits** with the radio retrying (the
+health check needs free heap, and the network stack uses a lot), and three HiL scenarios unchanged. The run over a real Wi-Fi network
+needs your credentials and is recorded as `ota_matrix_real_wifi` once you have run it.
+
+## 10. Telemetry (`fleet/telemetry.py`)
 
 Safety events as JSON on `ssb/fleet/<device>/<event>`: boot (version, whether the safe state was restored), staged /
 commit / rollback, resets, and SAF_Status changes (state and cause) read from the frames board A mirrors — the status
@@ -172,7 +194,7 @@ frames are E2E-protected, so a stale copy is counted as a reject instead of bein
 Publishing is best effort: with no broker, or no `paho-mqtt`, events are kept in memory only and never block or fail a
 test. `reports/fleet/fleet_events.jsonl` holds the events of the release runs.
 
-## 10. The release decision (`python -m fleet.release`)
+## 11. The release decision (`python -m fleet.release`)
 
 | Verdict | When |
 |---|---|
@@ -193,7 +215,8 @@ the truth of the evidence.
 
 Listed in the report itself, under the standing limits of the evidence:
 
-- the update reaches the real board through a broker and a **PC gateway on its USB link**; the board has no Wi-Fi radio or MQTT client of its own
+- until you run `--real --wifi` on your network, the update reaches the real board through a broker and a **PC gateway on its USB link**.
+  Once you have, the link is the board's own radio, as **plain MQTT without TLS and one login shared by all boards**, on a LAN you trust
 - the signing key is a **demo key** compiled into the image
 - no supply is ever cut: a reset at the exact write boundaries of an update stands in for it (REL-11). A **torn single flash write**
   and the **supply ramp / brown-out** need the relay and 5 V supply (`docs/HIL_POWER_CUT.md`), which are not fitted
