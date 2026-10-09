@@ -150,6 +150,28 @@ The first full matrix with no FAIL at all, twice in a row, without hand-picking 
 | Board A | **0 receive overflows**, queue high-water mark 2, 0 drops, 0 re-inits, 0 SPI glitches |
 | Board B | worst cycle 80 µs, lateness 0 ms, 0 CAN transmit failures |
 
+## Generated SR-01 cases on hardware (v2.15, 8 Oct 2026)
+
+The SR-01 cases derived by `python -m design` (5 executable + 2 probes), run with `run.py --scenario-file` on both boards
+(`--kick gpio`), as an engineering check before the gated campaign (`reports/design/2026-10-08_sr01_hil`, waiting at
+`basis_review`).
+
+| Run | Result |
+|---|---|
+| Reference firmware | **7/7 PASS** (probes included); detection 98 / 100 / 98 / 110 / 101 ms; worst cycle 82 µs; 0 status E2E rejects |
+| Back-to-back vs the PC reference | **7/7 match** |
+| Seeded `long_timeout` (sent in B's reset command, no separate build) | **5/5 executable cases FAIL**: detection 1000 / 1000 / 1000 / 1010 ms against FTTI 250; the 101 ms loss not detected. Same as the PC levels |
+
+Hardware detects at 98 ms twice, i.e. before the 100 ms threshold: the timeout counts from the last good frame, which can be
+up to one 20 ms period before the injection. That is why the derived lower bound is threshold − one period (80 ms), not 100.
+
+**Board B "CAN FAILED - PiL only" (open, cause unknown).** Before the run, B booted with its MCP2515 init failing, three
+times in a row (RTS resets). SpiProbe then read every register right at 0.1 / 1 / 10 MHz and showed all lines driven: not
+the wiring. After reflashing SafetyNode 2.6, CAN came up at once and stayed up for the runs above. SafetyNode's init
+(`ssc_board.h`) already retries SPI RESET + bitrate + normal mode 3 times per crystal setting, and all 6 attempts failed on
+each of the three boots, while the probe sketch flashed right after read the chip correctly. Cause unknown. Next time, before
+reflashing: log which step fails (reset, bitrate, or normal mode) and CANSTAT, and note whether a USB unplug alone clears it.
+
 ## Not yet done (needs parts)
 
 A real power cut through a relay (prepared in v2.12: SC-42, BusNode 2.7, wiring and procedure in `HIL_POWER_CUT.md`; needs the relay, a 5 V supply and a data-only USB lead), CAN FD (MCP2518FD), an independent USB-CAN sniffer. See `IMPROVEMENTS.md` 6.5 and the hardware plan in the v2.8 notes.

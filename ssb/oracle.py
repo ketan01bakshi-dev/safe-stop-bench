@@ -32,6 +32,8 @@ def verdict(r: dict, sc: dict, reqs: dict, cfg: dict) -> dict:
         checks.append(("no reaction (no false stop)", peak == 0 and not r["ecu_fallback"]))
     elif want == "ECU_FALLBACK":
         checks.append(("actuator ECU fallback stopped the vehicle", r["ecu_fallback"]))
+    elif isinstance(want, list):   # any of these stop reactions is acceptable (v2.24)
+        checks.append((f"reaction in {want}", peak_state in want))
     elif want:
         checks.append((f"reaction {want}", peak_state == want))
     if e.get("cause"):
@@ -47,6 +49,11 @@ def verdict(r: dict, sc: dict, reqs: dict, cfg: dict) -> dict:
         checks.append((f"detected within FTTI {ftti} ms", k["t_detect_ms"] is not None and k["t_detect_ms"] <= ftti))
         if k["t_detect_ms"] is not None:
             k["margin_ms"] = ftti - k["t_detect_ms"]
+    if "min_detect_ms" in e:
+        # v2.14 (generated fault-injection cases): no reaction before the requirement's threshold minus one frame period;
+        # a controller that stops at once on any gap passes every "reaction" check but fails this one. No reaction at all is
+        # the reaction check's failure, not this one's
+        checks.append((f"no reaction before {e['min_detect_ms']} ms", k["t_detect_ms"] is None or k["t_detect_ms"] >= e["min_detect_ms"]))
     if e.get("stop"):
         checks.append(("vehicle stopped", r["v_end_kmh"] == 0.0))
     if e.get("latched"):

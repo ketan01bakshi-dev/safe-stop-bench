@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "ssc_core.h"
+#include "ssc_uds.h"
 
 #if defined(_WIN32)
 #define SSC_EXPORT extern "C" __declspec(dllexport)
@@ -103,4 +104,10 @@ SSC_EXPORT int ssc_node_restore(void *h, const uint8_t *blob, int n, int64_t now
   return ((HostNode *)h)->node.restore(blob, (uint8_t)n, now) ? 1 : 0;
 }
 SSC_EXPORT int ssc_n_config() { return N_CONFIG; }
+
+// UDS responder (ssc_uds.h) for the PC tests: which = 0 board B, 1 board A. Returns the response length (0 = none).
+SSC_EXPORT int ssc_uds_respond(int which, const char *version, uint32_t serial, uint16_t rx_id, const uint8_t *d, int n, uint8_t *out) {
+  uds::Node node = {which ? uds::ID_A_REQ : uds::ID_B_REQ, which ? uds::ID_A_RESP : uds::ID_B_RESP, version, serial};
+  return uds::respond(node, rx_id, d, (uint8_t)n, out);
+}
 #endif

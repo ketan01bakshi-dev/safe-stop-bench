@@ -2,6 +2,7 @@ __pycache__/
 reports/traces/
 .venv/
 hil/build/
+fleet/images/
 reports/
 fmu/*.fmu
 hil/build/

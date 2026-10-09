@@ -31,6 +31,12 @@ jobs:
         with:
           python-version: "3.12"
       - run: python run.py --full
+      # v2.27: the OTA matrix and the power-cut windows, emulated, directly and through a local MQTT broker (no hardware)
+      - run: pip install -e ".[fleet]"
+      - run: python -m fleet.ota_matrix --emulated
+      - run: python -m fleet.ota_matrix --emulated --mqtt
+      - run: python -m fleet.ota_matrix --emulated --cut-windows
+      - run: python -m unittest -v tests.test_fleet
       - uses: mikepenz/action-junit-report@v6
         if: always()
         with:

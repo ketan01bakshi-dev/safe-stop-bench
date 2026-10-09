@@ -1,0 +1,26 @@
+{
+  "_note": "The one list of CAN IDs on the bench bus (v2.13, integration plan P0). tests: CanIdRegistryTests fails if the DBC, the C++ core, the firmware or the Python bench uses an ID that is not here, or if an 'active' ID is missing from the DBC. 'reserved' = planned, not used yet. 'elsewhere' = IDs used by related projects on THEIR own bus; listed so a merge never puts a clash on this wire.",
+  "bus": {"bitrate_kbps": 500, "note": "classic CAN on the two-board HiL bus (MCP2515 at 500 kbit/s); PLN_Command is CAN FD (16 bytes) on the virtual and CAN-process levels"},
+  "ids": [
+    {"id": "0x100", "name": "PLN_Command",     "sender": "PLANNER", "status": "active",   "e2e": "Profile 5 (CRC-16 CCITT + data ID)"},
+    {"id": "0x101", "name": "PLN_WdKick",      "sender": "PLANNER", "status": "active",   "e2e": "none (watchdog Q&A in the payload)"},
+    {"id": "0x200", "name": "SAF_ActuatorCmd", "sender": "SAFETY",  "status": "active",   "e2e": "Profile 2 (CRC8H2F + counter)"},
+    {"id": "0x201", "name": "SAF_Status",      "sender": "SAFETY",  "status": "active",   "e2e": "CRC8H2F over bytes 1-7 + data ID 0x201, 8-bit alive counter (v2.9.6)"},
+    {"id": "0x300", "name": "VEH_Feedback",    "sender": "BENCH",   "status": "active",   "e2e": "none (bench plant)"},
+    {"id": "0x301", "name": "BENCH_Control",   "sender": "BENCH",   "status": "active",   "e2e": "none (bench control)"},
+    {"id": "0x7DF", "name": "UDS_Functional",       "sender": "TESTER",  "status": "reserved", "phase": "P2", "note": "functional TesterPresent: lists every node that answers"},
+    {"id": "0x7E2", "name": "UDS_SafetyNode_Req",   "sender": "TESTER",  "status": "reserved", "phase": "P2", "note": "0x7E0 avoided: the CAN IDS demo's ECU_SPOOF attack uses it"},
+    {"id": "0x7EA", "name": "UDS_SafetyNode_Resp",  "sender": "SAFETY",  "status": "reserved", "phase": "P2"},
+    {"id": "0x7E3", "name": "UDS_BusNode_Req",      "sender": "TESTER",  "status": "reserved", "phase": "P2"},
+    {"id": "0x7EB", "name": "UDS_BusNode_Resp",     "sender": "BUSNODE", "status": "reserved", "phase": "P2"}
+  ],
+  "elsewhere": [
+    {"id": "0x100", "name": "ACC_Status", "project": "HIL ML Ops ACC demo", "on_this_bus": false, "note": "CLASH with PLN_Command; the demo keeps its own virtual bus (move to 0x180 if it ever shares this wire)"},
+    {"id": "0x200", "name": "HIL_Stim",   "project": "HIL ML Ops ACC demo", "on_this_bus": false, "note": "CLASH with SAF_ActuatorCmd (move to 0x280 if it ever shares this wire)"},
+    {"id": "0x0C8", "name": "engine_rpm",     "project": "CAN IDS demo", "on_this_bus": false, "note": "retired in P3: the IDS learns the safe-stop messages instead"},
+    {"id": "0x0D0", "name": "vehicle_speed",  "project": "CAN IDS demo", "on_this_bus": false},
+    {"id": "0x1A4", "name": "brake_pressure", "project": "CAN IDS demo", "on_this_bus": false},
+    {"id": "0x3A1", "name": "door_status",    "project": "CAN IDS demo", "on_this_bus": false},
+    {"id": "0x7E0", "name": "ECU_SPOOF target", "project": "CAN IDS demo", "on_this_bus": false, "note": "attack target ID; P3 attacks will aim at the IDs above instead"}
+  ]
+}

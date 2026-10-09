@@ -39,7 +39,8 @@ def serve(port_b: int, port_a: int | None) -> None:
             s.setblocking(False)
             listeners[role] = s
     conns: dict[str, socket.socket] = {}
-    node, par = LoopbackLink(), Parser()
+    node: LoopbackLink | None = LoopbackLink()
+    par = Parser()
     par_a = Parser()                  # commands the bench sends to board A ('K' kicks, 'X' power cut)
     boot_at = None                    # board B unpowered (then booting) until this time
     stored = b""                      # B's configuration "in NVS"
@@ -111,8 +112,8 @@ def serve(port_b: int, port_a: int | None) -> None:
                 continue
             if pending[role]:
                 try:
-                    k = conns[role].send(pending[role])
-                    del pending[role][:k]
+                    n_sent = conns[role].send(pending[role])
+                    del pending[role][:n_sent]
                 except BlockingIOError:
                     pass
                 except OSError:

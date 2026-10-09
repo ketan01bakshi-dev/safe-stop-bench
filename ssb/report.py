@@ -1,10 +1,14 @@
-"""Reports: HTML (one page), JSON, JUnit XML, CSV traces, diff against the previous run."""
+"""Reports: HTML (one page), JSON, JUnit XML, CSV traces, diff against the previous run, run manifest."""
 from __future__ import annotations
 
 import csv
 import hashlib
 import html
 import json
+import platform
+import re
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -70,6 +74,57 @@ def write_all(out_dir: Path, results: list, extras: dict, label: str = "report")
     return page
 
 
+def _sha256(p: Path) -> str:
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def _git() -> dict | None:
+    try:
+        run = lambda *a: subprocess.run(["git", *a], cwd=ROOT, capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+        return {"commit": run("rev-parse", "HEAD"), "dirty": bool(run("status", "--porcelain", "--untracked-files=no"))}
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def write_manifest(out_dir: Path, label: str, results: list, run: dict, started: datetime, firmware: dict | None = None,
+                   extra_files: list[Path] | None = None) -> Path:
+    """`<label>_manifest.json`: what was run, on what, and the SHA-256 of every file the run wrote (v2.13, integration plan P0).
+
+    One record per run for the tools that come after the bench (approval gates bind to this file's hash; the dashboard and
+    the defect publisher read only report files). `run` = level, config, plant, defects, command line. The CSV traces in
+    reports/traces/ are shared by every run and overwritten by the next one: their hashes say what THIS run wrote."""
+    files = [out_dir / f"{label}{s}" for s in ("_results.json", "_junit.xml", ".html")]
+    files += [out_dir / "traces" / f"{r['key'].replace('/', '_').replace('@', '_')}.csv" for r in results]
+    files += extra_files or []
+    reruns = [(r["key"], f) for r in results for f in r.get("bench_faults") or []]
+    known = sum(r["verdict"]["status"] == "KNOWN" for r in results)
+    passed = sum(r["verdict"]["passed"] for r in results)
+    toml = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    m = re.search(r'^version = "([^"]+)"', toml, flags=re.M)
+    finished = datetime.now()
+    manifest = {
+        "run_id": f"{started:%Y%m%dT%H%M%S}_{label}",
+        "label": label,
+        "bench": bench_identity(),
+        "bench_version": m.group(1) if m else None,
+        "git": _git(),
+        "run": run,
+        "scenarios": {"count": len(results),
+                      "keys_sha256": hashlib.sha256("\n".join(sorted(r["key"] for r in results)).encode()).hexdigest()},
+        "summary": {"total": len(results), "passed": passed, "known": known, "failed": len(results) - passed - known},
+        "bench_faults": {"reruns": len(reruns), "host_stalls": sum("host stall" in f for _, f in reruns),
+                         "scenarios": sorted({k for k, _ in reruns})},
+        "firmware": firmware,
+        "host": {"name": platform.node(), "os": platform.platform(), "python": sys.version.split()[0]},
+        "started": started.isoformat(timespec="seconds"),
+        "finished": finished.isoformat(timespec="seconds"),
+        "files": {p.relative_to(out_dir).as_posix(): _sha256(p) for p in files if p.exists()},
+    }
+    path = out_dir / f"{label}_manifest.json"
+    path.write_text(json.dumps(manifest, indent=1), encoding="utf-8")
+    return path
+
+
 def _junit(path: Path, results: list) -> None:
     # A KNOWN finding (documented in the config, run.py exits 0) is <skipped> with its reason, not <failure>: JUnit has no
     # "known issue" status, and as a failure it turned the CI report check red while every job passed (v2.11).
@@ -123,9 +178,18 @@ def _html(results, ex, meta, prev) -> str:
         for q in r["req"]:
             by_req.setdefault(q, []).append(r)
     reqs = ex["requirements"]["requirements"]
+
+    def req_status(q: str) -> str:
+        rs = by_req.get(q)
+        if rs:
+            return "<span class=pass>all pass</span>" if all(x["verdict"]["passed"] for x in rs) else "<span class=fail>fail</span>"
+        if reqs[q].get("verified_by"):   # v2.13: covered by unit/integration tests, not by a matrix scenario
+            return f"<span class=warn>unit tests only</span><br><small>{html.escape(', '.join(reqs[q]['verified_by']))}</small>"
+        return "<span class=fail>gap</span>"
+
     trace_rows = "".join(
         f"<tr><td><b>{q}</b> <small>({reqs[q]['goal']})</small></td><td>{html.escape(reqs[q]['text'])}</td><td>{_f(reqs[q].get('ftti_ms'), ' ms')}</td>"
-        f"<td>{len(by_req.get(q, []))}</td><td>{'<span class=pass>all pass</span>' if by_req.get(q) and all(x['verdict']['passed'] for x in by_req[q]) else ('<span class=fail>gap</span>' if not by_req.get(q) else '<span class=fail>fail</span>')}</td></tr>"
+        f"<td>{len(by_req.get(q, []))}</td><td>{req_status(q)}</td></tr>"
         for q in reqs)
     goals = ex["requirements"]["goals"]
     cov_rows = "".join(f"<tr><td>{g}</td><td>{html.escape(t)}</td><td class=pass>SiL ✓</td><td class=mut>HiL –</td><td class=mut>vehicle –</td></tr>" for g, t in goals.items())
@@ -167,8 +231,12 @@ def _html(results, ex, meta, prev) -> str:
         qs = [q for q in reqs if reqs[q]["goal"] == g]
         ev = [r for q in qs for r in by_req.get(q, [])]
         good = ev and all(r["verdict"]["passed"] for r in ev)
-        case.append(f"<li><b>Claim {g}:</b> {html.escape(text)}. <b>Argument:</b> requirements {', '.join(qs)} define the reaction and its time budget. "
-                    f"<b>Evidence:</b> {len(ev)} SiL scenarios, {'all passing' if good else 'NOT all passing'}; mutation score {mu['score'] if mu else '–'}%. "
+        by_tests = [q for q in qs if not by_req.get(q) and reqs[q].get("verified_by")]   # v2.13: e.g. SR-19, unit tests only
+        qs = [q for q in qs if q not in by_tests]
+        case.append(f"<li><b>Claim {g}:</b> {html.escape(text)}. <b>Argument:</b> requirements {', '.join(qs)} define the reaction and its time budget"
+                    f"{'; ' + ', '.join(by_tests) + ' protect the inputs that argument relies on' if by_tests else ''}. "
+                    f"<b>Evidence:</b> {len(ev)} SiL scenarios, {'all passing' if good else 'NOT all passing'}"
+                    f"{' (' + ', '.join(by_tests) + ': unit/integration tests, no scenario)' if by_tests else ''}; mutation score {mu['score'] if mu else '–'}%. "
                     f"<b>Open:</b> no HiL or vehicle evidence yet; limits are illustrative.</li>")
 
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -195,7 +263,8 @@ reactions: DEGRADED (speed cap) → PULL_OVER (planner-executed) → STOP_IN_LAN
 {f"<h2>Mutation testing (testing the tests)</h2><table><tr><th>Mutant</th><th>Seeded bug</th><th>Result</th><th>First scenario that caught it</th></tr>{mu_rows}</table>" if mu else ""}
 {b2b_html}
 {("<h2>Real-time timing (repeated runs)</h2><table><tr><th>Scenario</th><th>Runs passed</th><th>Detect min / typ / max</th><th>FTTI</th><th>Worst-case margin</th></tr>" + "".join(f"<tr><td>{x['key']}</td><td>{x['passed']}/{x['runs']}</td><td>{_f(x['min_ms'])} / {_f(x['typ_ms'])} / {_f(x['max_ms'])} ms</td><td>{_f(x['ftti_ms'], ' ms')}</td><td>{_f(x['worst_margin_ms'], ' ms')}</td></tr>" for x in ex['timing']) + "</table>") if ex.get("timing") else ""}
-<h2>Gaps</h2><p>Requirements with no scenario: {html.escape(', '.join(gp.get('requirements_without_scenario', [])) or 'none')}.</p>
+<h2>Gaps</h2><p>Requirements with no scenario: {html.escape(', '.join(gp.get('requirements_without_scenario', [])) or 'none')}.
+Verified by unit/integration tests only (no matrix scenario): {html.escape(', '.join(gp.get('requirements_verified_by_tests_only', [])) or 'none')}.</p>
 <table><tr><th>SOTIF item</th><th>Condition</th><th>Coverage</th><th>How / why not</th></tr>{''.join(f"<tr><td>{s['id']}</td><td>{html.escape(s['condition'])}</td><td>{s['bench_coverage']}</td><td>{html.escape(s['how'])}</td></tr>" for s in gp.get('sotif_items_out_of_scope', []))}</table>
 <h2>FTTI derivation (illustrative)</h2><table><tr><th>Req</th><th>km/h</th><th>Hazard</th><th>Assumption</th><th>Budget</th></tr>{ftti_rows}</table>
 <h2>Safety-case fragment (claim → argument → evidence)</h2><ul>{''.join(case)}</ul>

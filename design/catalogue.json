@@ -1,0 +1,15 @@
+{
+  "_note": "How requirement wording maps onto the bench (v2.14). A trigger phrase names the bench fault that puts it into effect; a reaction phrase names the state the oracle checks. The rules drafter only accepts a requirement whose trigger and reaction are both listed here; anything else is 'unparsed' and needs a hand-written basis in design/basis/<req>.json (or, later, an LLM draft) that passes the same checks.",
+  "triggers": [
+    {"id": "command_loss", "match": ["no valid command"], "fault": "link_lost", "duration_param": "end",
+     "message": "PLN_Command", "period_ms": 20, "config_threshold": "cmd_timeout_ms",
+     "cause": ["TIMEOUT"], "cause_after_resume": ["TIMEOUT", "E2E_INVALID"],
+     "_cause_note": "when the link comes back, the first frame after the gap fails the sequence check, so E2E_INVALID can win the race against the timeout (bench finding 2)",
+     "below_threshold_req": null}
+  ],
+  "reactions": {
+    "stop in lane": {"reaction": "STOP_IN_LANE", "stop": true}
+  },
+  "latch_requirement": "SR-05",
+  "start_speeds_note": "EP over the start speed: low, mid and just inside the ODD limit (from the config)"
+}

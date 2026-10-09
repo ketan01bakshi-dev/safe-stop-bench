@@ -214,7 +214,9 @@ class SafetyController:
 
     def _envelope(self, t: int, c: dict, v: float) -> None:
         p, bad = self.p, False
-        if self.last_steer is not None and self.last_cmd_t is not None and t > self.last_cmd_t:
+        # v2.24: also for a SECOND valid command in the same cycle (t == last_cmd_t). Found by SC-68: a forged frame with a correct
+        # CRC and counter right behind the real one skipped the rate limit and moved the output steering 25 deg in one period.
+        if self.last_steer is not None and self.last_cmd_t is not None:
             dt = max(0.02, (t - self.last_cmd_t) / 1000)
             rate = (c["steer"] - self.last_steer) / dt
             lim = self.steer_rate_limit(v)

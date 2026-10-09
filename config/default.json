@@ -83,6 +83,8 @@
     "gravel": 0.4
   },
   "known_findings": {
+    "sec_signal_ramp": "OPEN (SEC-05): a man-in-the-middle that adds a slow steering drift (2 deg/s) to the real command, with a correct CRC, counter and timestamp, is seen by nothing: E2E accepts every frame, the intrusion detector finds every frame individually normal, and the safety envelope never trips (each step is far below the rate limit). In 12 s the vehicle ends 4.8 m off its path, no stop, no alert. The only reaction in an earlier run was an artifact of the attack ENDING (the real values snapping back). Needs a check against vehicle feedback (yaw rate / lane position), not a bus rule.",
+    "sec_fuzzy": "Fuzzing at one random frame per 5 ms puts only ~1 garbage frame in 40 ms on the command ID, between good frames: the E2E window tolerates that by design (SR-18), so the stop comes at ~410 ms, later than the 250 ms of SR-02. The intrusion detector alerts at once; the safety layer alone is slower. Option: let an IDS alert shorten the E2E window.",
     "bv_steer_rate_40kmh_16dps": "At 40 km/h the 26 m stop drifts ~1.0 m sideways: the safety controller holds heading but has no lane information. Options: follow the planner's last valid path, or a higher stop deceleration at speed."
   }
 }

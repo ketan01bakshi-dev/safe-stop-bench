@@ -15,11 +15,19 @@
 // v2.12 (BusNode 2.7): power cut of board B. 'X' <ms:u16> from the PC energises the relay on GPIO6 for that long
 // (non-blocking, at most 60 s); the relay's normally-closed contact is in B's 5 V supply, so B loses power and comes back
 // when it releases. The pin is low at boot, so an A that resets or hangs in boot never leaves B unpowered.
+//
+// v2.23 (BusNode 2.8): bench-health UDS. 'T' <id:u16> <dlc> <data> from the PC puts one standard CAN frame on the bus (the
+// bench's tester port: UDS requests on 0x7DF / 0x7E2 / 0x7E3). A answers UDS itself on 0x7E3 -> 0x7EB (and 0x7DF) with
+// TesterPresent and ReadDataByIdentifier F195 (version) / F18C (serial); its answer is also forwarded to the PC ('M'),
+// because a node does not receive its own frames. Transmit happens in the CAN task like all other SPI traffic.
 #include <Arduino.h>
 #include <SPI.h>
 #include <mcp2515.h>
 #include <ssc_board.h>
 #include <ssc_core.h>
+#include <ssc_uds.h>
+
+#define FW_VERSION "2.8"
 
 #ifndef CAN_SPI_HZ
 #define CAN_SPI_HZ 10000000   // the library default
@@ -40,7 +48,8 @@ static volatile bool can_ok = false, can_started = false, force_diag = false;
 static volatile uint32_t rx_count = 0, overflows = 0, q_drops = 0, int_cleared = 0, rx1_cleared = 0;
 static volatile uint16_t reinits = 0, glitches = 0, rx1_mismatch = 0, q_high = 0;
 static volatile uint8_t last_eflg = 0, bad_mode = 0, last_stat = 0, bukt = 0xEE;
-static QueueHandle_t rxq;
+static QueueHandle_t rxq, txq;
+static ssc::uds::Node uds_node = {ssc::uds::ID_A_REQ, ssc::uds::ID_A_RESP, FW_VERSION, 0};
 static TaskHandle_t can_task_h;
 
 static void send(uint8_t type, const uint8_t *p, uint8_t n) {
@@ -82,9 +91,24 @@ static void drain_rxb0() {
     }
     if (mcp.readMessage(MCP2515::RXB0, &f) != MCP2515::ERROR_OK) return;
     if (xQueueSend(rxq, &f, 0) != pdTRUE) q_drops++;
+    uds_answer(f);
     UBaseType_t used = QUEUE_LEN - uxQueueSpacesAvailable(rxq);
     if (used > q_high) q_high = (uint16_t)used;
   }
+}
+
+// A UDS request addressed to A (seen on the bus, or sent by A itself for the PC): answer on the bus and tell the PC.
+static void uds_answer(const struct can_frame &f) {
+  if (f.can_id & CAN_EFF_FLAG) return;
+  uint8_t out[8];
+  uint8_t k = ssc::uds::respond(uds_node, (uint16_t)(f.can_id & 0x7FF), f.data, f.can_dlc, out);
+  if (!k) return;
+  struct can_frame r;
+  r.can_id = uds_node.resp_id;
+  r.can_dlc = k;
+  memcpy(r.data, out, k);
+  mcp.sendMessage(&r);
+  if (xQueueSend(rxq, &r, 0) != pdTRUE) q_drops++;
 }
 
 static void can_task(void *) {
@@ -101,6 +125,11 @@ static void can_task(void *) {
     }
     uint32_t now = millis();
     if (can_ok) drain_rxb0();
+    struct can_frame tx;
+    while (can_ok && xQueueReceive(txq, &tx, 0) == pdTRUE) {   // frames the PC asked A to send ('T')
+      mcp.sendMessage(&tx);
+      uds_answer(tx);   // a request for A itself: A does not receive its own frame
+    }
     if (can_ok && now - last_flags >= 2) {
       last_flags = now;
       uint8_t e = mcp.getErrorFlags();
@@ -140,8 +169,10 @@ void setup() {
   can_ok = board::mcp_init(mcp, &xtal);
   can_started = can_ok;
   bukt = can_ok ? board::mcp_read_reg(0x60) : 0xEE;   // diagnostics: RXB0CTRL (BUKT must be 0)
-  snprintf(fw, sizeof fw, "BusNode 2.7 (A) CAN %s", can_ok ? xtal : "FAILED");
+  uds_node.serial = (uint32_t)ESP.getEfuseMac();
+  snprintf(fw, sizeof fw, "BusNode " FW_VERSION " (A) CAN %s", can_ok ? xtal : "FAILED");
   rxq = xQueueCreate(QUEUE_LEN, sizeof(struct can_frame));
+  txq = xQueueCreate(8, sizeof(struct can_frame));
   xTaskCreatePinnedToCore(can_task, "can_rx", 4096, nullptr, configMAX_PRIORITIES - 2, &can_task_h, 0);
   pinMode(board::PIN_CAN_INT, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(board::PIN_CAN_INT), on_can_int, FALLING);
@@ -166,6 +197,12 @@ void loop() {
         digitalWrite(board::PIN_WD_LINE, LOW);
         delayMicroseconds(50);
       }
+    } else if (parser.type == 'T' && parser.len >= 3 && parser.payload[2] <= 8 && parser.len >= 3 + parser.payload[2]) {
+      struct can_frame t;
+      t.can_id = (uint32_t)parser.payload[0] | (uint32_t)(parser.payload[1] & 0x07) << 8;
+      t.can_dlc = parser.payload[2];
+      memcpy(t.data, parser.payload + 3, t.can_dlc);
+      xQueueSend(txq, &t, 0);
     } else if (parser.type == 'X' && parser.len >= 2 && relay_ms == 0) {
       uint32_t ms = (uint32_t)parser.payload[0] | (uint32_t)parser.payload[1] << 8;
       relay_ms = ms > 60000 ? 60000 : (ms ? ms : 1);

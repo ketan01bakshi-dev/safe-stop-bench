@@ -1,0 +1,5 @@
+{
+  "_note": "What the HiL bench must be running. A run whose boards report anything else is a SUSPECT BENCH run, not a verdict on the product. Update when firmware is flashed on purpose.",
+  "board_b": {"role": "safety controller (DUT)", "firmware": "SafetyNode 2.50", "port_hint": "COM13"},
+  "board_a": {"role": "actuator-bus node", "firmware": "BusNode 2.8", "port_hint": "COM14"}
+}

@@ -1,0 +1,357 @@
+{
+ "_note": "P3 attack scenarios (SEC-01..05). Run: python run.py --scenario-file scenarios/security.json --dut reference, or python -m security.matrix. 'sec' is read by security/matrix.py: ids_within_ms = the intrusion detector must alert within that time of the attack start (null = it cannot; residual_risk = documented gap).",
+ "scenarios": [
+  {
+   "id": "SC-60",
+   "key": "sec_clean_control",
+   "title": "Control: no attack, intrusion detector on (false-alarm check)",
+   "req": [
+    "SEC-01"
+   ],
+   "ids": "both",
+   "faults": [],
+   "expect": {
+    "reaction": "NORMAL"
+   },
+   "sec": {
+    "ids_alert": false
+   }
+  },
+  {
+   "id": "SC-61",
+   "key": "sec_flood_high_priority",
+   "title": "Flood with the highest-priority ID 0x001 starves the command stream",
+   "req": [
+    "SEC-01"
+   ],
+   "ids": "both",
+   "faults": [
+    {
+     "type": "attack",
+     "kind": "flood",
+     "start": 3000,
+     "id": 1,
+     "per_ms": 8
+    }
+   ],
+   "expect": {
+    "reaction": "STOP_IN_LANE",
+    "stop": true,
+    "latched": true,
+    "cause": [
+     "TIMEOUT"
+    ]
+   },
+   "sec": {
+    "ids_within_ms": 100
+   },
+   "inject_ms": 3000
+  },
+  {
+   "id": "SC-62",
+   "key": "sec_flood_low_priority",
+   "title": "Flood with the lowest-priority ID 0x7FF cannot starve commands",
+   "req": [
+    "SEC-01"
+   ],
+   "ids": "both",
+   "faults": [
+    {
+     "type": "attack",
+     "kind": "flood",
+     "start": 3000,
+     "id": 2047,
+     "per_ms": 1,
+     "end": 6000
+    }
+   ],
+   "expect": {
+    "reaction": "NORMAL"
+   },
+   "sec": {
+    "ids_within_ms": 100
+   },
+   "inject_ms": 3000
+  },
+  {
+   "id": "SC-63",
+   "key": "sec_fuzzy",
+   "title": "Fuzzing: random IDs, lengths and bytes every 5 ms",
+   "req": [
+    "SEC-01",
+    "SEC-02"
+   ],
+   "ids": "both",
+   "faults": [
+    {
+     "type": "attack",
+     "kind": "fuzzy",
+     "start": 3000,
+     "period_ms": 5,
+     "end": 6000
+    }
+   ],
+   "expect": {
+    "reaction": "STOP_IN_LANE",
+    "stop": true,
+    "latched": true,
+    "cause": [
+     "E2E_INVALID",
+     "TIMEOUT"
+    ]
+   },
+   "sec": {
+    "ids_within_ms": 100
+   },
+   "inject_ms": 3000
+  },
+  {
+   "id": "SC-64",
+   "key": "sec_spoof_bad_crc",
+   "title": "Forged commands with a wrong CRC injected beside the real ones",
+   "req": [
+    "SEC-02"
+   ],
+   "ids": "both",
+   "faults": [
+    {
+     "type": "attack",
+     "kind": "spoof_invalid",
+     "start": 3000
+    }
+   ],
+   "expect": {
+    "reaction": "STOP_IN_LANE",
+    "stop": true,
+    "latched": true,
+    "cause": [
+     "E2E_INVALID"
+    ]
+   },
+   "sec": {
+    "ids_within_ms": 100
+   },
+   "inject_ms": 3000
+  },
+  {
+   "id": "SC-65",
+   "key": "sec_period_glitch",
+   "title": "An extra copy of the last real command 7 ms after it (repeated counter)",
+   "req": [
+    "SEC-02"
+   ],
+   "ids": "both",
+   "faults": [
+    {
+     "type": "attack",
+     "kind": "period_glitch",
+     "start": 3000,
+     "offset_ms": 7
+    }
+   ],
+   "expect": {
+    "reaction": "STOP_IN_LANE",
+    "stop": true,
+    "latched": true,
+    "cause": [
+     "E2E_INVALID"
+    ]
+   },
+   "sec": {
+    "ids_within_ms": 100
+   },
+   "inject_ms": 3000
+  },
+  {
+   "id": "SC-66",
+   "key": "sec_replay_old",
+   "title": "Replay of commands 300 ms old in place of the real stream (out of sequence)",
+   "req": [
+    "SEC-03"
+   ],
+   "ids": "both",
+   "faults": [
+    {
+     "type": "attack",
+     "kind": "replay",
+     "start": 3000,
+     "age_ms": 300,
+     "mode": "takeover"
+    }
+   ],
+   "expect": {
+    "reaction": "STOP_IN_LANE",
+    "stop": true,
+    "latched": true,
+    "cause": [
+     "STALE_DATA",
+     "E2E_INVALID"
+    ]
+   },
+   "sec": {
+    "ids_within_ms": 100
+   },
+   "inject_ms": 3000
+  },
+  {
+   "id": "SC-67",
+   "key": "sec_replay_256_periods",
+   "title": "Replay of commands exactly 256 periods (5.12 s) old: the counter matches again",
+   "req": [
+    "SEC-03"
+   ],
+   "ids": "both",
+   "faults": [
+    {
+     "type": "attack",
+     "kind": "replay",
+     "start": 6000,
+     "age_ms": 5120,
+     "mode": "takeover"
+    }
+   ],
+   "expect": {
+    "reaction": "STOP_IN_LANE",
+    "stop": true,
+    "latched": true,
+    "cause": [
+     "STALE_DATA",
+     "E2E_INVALID"
+    ]
+   },
+   "sec": {
+    "ids_within_ms": 100
+   },
+   "duration_ms": 10000,
+   "inject_ms": 6000
+  },
+  {
+   "id": "SC-68",
+   "key": "sec_spoof_valid_inject",
+   "title": "Forged command, correct CRC and counter, steering 25\u00b0 / +1.5 m/s\u00b2, injected beside the real stream",
+   "req": [
+    "SEC-04"
+   ],
+   "ids": "both",
+   "faults": [
+    {
+     "type": "attack",
+     "kind": "spoof_valid",
+     "start": 3000,
+     "mode": "inject",
+     "steer": 25.0,
+     "accel": 1.5
+    }
+   ],
+   "expect": {
+    "reaction": [
+     "STOP_IN_LANE",
+     "BRAKE_ONLY_STOP"
+    ],
+    "stop": true,
+    "latched": true,
+    "cause": [
+     "E2E_INVALID"
+    ]
+   },
+   "sec": {
+    "ids_within_ms": 100
+   },
+   "inject_ms": 3000
+  },
+  {
+   "id": "SC-69",
+   "key": "sec_spoof_valid_takeover",
+   "title": "Man-in-the-middle: real commands removed, forged valid ones (steering 25\u00b0, +1.5 m/s\u00b2) in their place",
+   "req": [
+    "SEC-04"
+   ],
+   "ids": "both",
+   "faults": [
+    {
+     "type": "attack",
+     "kind": "spoof_valid",
+     "start": 3000,
+     "mode": "takeover",
+     "steer": 25.0,
+     "accel": 1.5
+    }
+   ],
+   "expect": {
+    "reaction": [
+     "STOP_IN_LANE",
+     "BRAKE_ONLY_STOP"
+    ],
+    "stop": true,
+    "latched": true
+   },
+   "sec": {
+    "ids_within_ms": 100
+   },
+   "inject_ms": 3000
+  },
+  {
+   "id": "SC-70",
+   "key": "sec_signal_ramp",
+   "title": "Man-in-the-middle with valid frames: steering drifts 2 deg/s from the real value, below every rate limit",
+   "req": [
+    "SEC-05"
+   ],
+   "ids": "both",
+   "faults": [
+    {
+     "type": "attack",
+     "kind": "signal_ramp",
+     "start": 3000,
+     "dps": 2.0,
+     "end": 20000
+    }
+   ],
+   "expect": {
+    "reaction": [
+     "STOP_IN_LANE",
+     "BRAKE_ONLY_STOP"
+    ],
+    "cause": [
+     "ENVELOPE"
+    ],
+    "stop": true,
+    "latched": true
+   },
+   "sec": {
+    "ids_within_ms": 3000
+   },
+   "duration_ms": 12000,
+   "inject_ms": 3000
+  },
+  {
+   "id": "SC-71",
+   "key": "sec_mimic",
+   "title": "Man-in-the-middle copies the real values with a fresh timestamp, counter and CRC (residual risk)",
+   "req": [
+    "SEC-05"
+   ],
+   "ids": "both",
+   "faults": [
+    {
+     "type": "attack",
+     "kind": "spoof_valid",
+     "start": 3000,
+     "mode": "takeover",
+     "accel": null,
+     "steer": null,
+     "speed": null,
+     "end": 6000
+    }
+   ],
+   "expect": {
+    "reaction": "NORMAL"
+   },
+   "sec": {
+    "ids_within_ms": null,
+    "residual_risk": true
+   },
+   "inject_ms": 3000
+  }
+ ]
+}

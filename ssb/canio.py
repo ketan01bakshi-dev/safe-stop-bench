@@ -48,7 +48,8 @@ class DedupBus:
         import can
         self.can = can
         self.bus = can.Bus(interface=interface, channel=channel, fd=True, receive_own_messages=False)
-        self.pid, self.seq = os.getpid(), 0
+        self.pid: int | str = os.getpid()   # only ever formatted into the channel tag; a second sender appends a suffix
+        self.seq = 0
         self.seen: set = set()
         self.order: deque = deque()
         self.duplicates = 0

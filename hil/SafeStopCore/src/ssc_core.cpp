@@ -211,7 +211,7 @@ SmState Controller::sm_update(E2EStatus s) {
 
 void Controller::envelope(int64_t t, double &accel, double &steer, double &speed_req, double v) {
   bool bad = false;
-  if (has_last_steer_ && t > last_cmd_t_) {
+  if (has_last_steer_) {   // v2.24: also a second valid command in the same cycle (t == last_cmd_t_), see ssb/safety.py
     double dt = pymax(0.02, (double)(t - last_cmd_t_) / 1000.0);
     double rate = (steer - last_steer_) / dt;
     double lim = steer_rate_limit(v);

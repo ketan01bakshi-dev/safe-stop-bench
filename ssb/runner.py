@@ -89,6 +89,15 @@ def _run_once(sc: dict, cfg: dict, dut: DeviceUnderTest | None, seed: int, keep_
     max_lag_ms = 0.0
     lag_at_ms = None
     planner = Planner(sc, cfg, rng, DATA_ID)
+    attacker = ids = None   # P3 security layer: an attacker node on the planner bus, an intrusion detector tapping what the DUT receives
+    if any(f["type"] == "attack" for f in sc.get("faults", [])):
+        from security.attacks import Attacker
+        attacker = Attacker(sc, DATA_ID, seed)
+    if sc.get("_ids") is not None:   # in-process tap (security/train.py collects traffic this way)
+        ids = sc["_ids"]
+    elif sc.get("ids"):
+        from security.ids import Ids
+        ids = Ids.default(sc.get("ids"))
     bp = VirtualBus("planner", cfg["buses"]["planner"]["frames_per_ms"], cfg["buses"]["planner"]["latency_ms"], rng)
     ba = VirtualBus("actuator", cfg["buses"]["actuator"]["frames_per_ms"], cfg["buses"]["actuator"]["latency_ms"], rng)
     ecu, act, veh = ActuatorECU(cfg), Actuators(cfg), make_vehicle(cfg, v0, sc.get("payload_kg"))
@@ -147,9 +156,18 @@ def _run_once(sc: dict, cfg: dict, dut: DeviceUnderTest | None, seed: int, keep_
         challenge = out.challenge if out else 0x5A
         mrm_req: str | None = out.mrm_request if out else None
         frames, kicks = planner.step(t, veh, challenge, mrm_req)
+        if attacker:
+            attacker.observe(t, frames, challenge)
+            if attacker.suppress(t):
+                frames = []   # man-in-the-middle: the real frames never reach the bus
+            for a_id, a_data, a_fd in attacker.frames(t):
+                if len(bp.queue) < 200:
+                    bp.send(t, "attacker", a_id, a_data, fd=a_fd)
         for fr in frames:
             bp.send(t, "planner", CMD_ID, fr, fd=True)
         frames_for_dut = bp.step(t)
+        if ids:
+            ids.observe(t, frames_for_dut)
         # grade_accel: what an IMU-based pitch estimate gives the safety controller (gravity along the slope)
         fb = {"v": veh.v, "a": veh.a, "delta": act.delta, "yaw_rate": veh.yaw_rate, "grade_accel": grade_accel(veh, road["grade_pct"])}
         out = dut.step(t, frames_for_dut, kicks, fb, t in releases, power_ok, not ba.bus_off)
@@ -224,6 +242,8 @@ def _run_once(sc: dict, cfg: dict, dut: DeviceUnderTest | None, seed: int, keep_
         "invariant_violations": inv[:10], "invariant_count": len(inv), "trace": trace, "bench_lag_ms": round(max_lag_ms, 1) if realtime else None,
         "bench_lag_at_ms": lag_at_ms if realtime else None,
         "bus_replays": getattr(dut, "n_replay", None),
+        "security": ({"attack_start_ms": attacker.first_start if attacker else None, "attack_frames": attacker.n_sent if attacker else 0,
+                      "ids": ids.summary() if ids else None} if (attacker or ids) else None),
         "status_e2e_rejects": getattr(dut, "n_status_crc", 0) + getattr(dut, "n_status_seq", 0) if hasattr(dut, "n_status_crc") else None,
     }
     return result

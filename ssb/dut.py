@@ -315,7 +315,9 @@ class CanDUT(BlackBoxObserver, DeviceUnderTest):
         self.bus = canio.DedupBus(interface, channel or canio.GROUP)
         self.status_replay, self.status_e2e = status_replay, status_e2e
         self.lockstep, self.realtime = lockstep, not lockstep
-        self.cycle_seen, self.status_c = 0, None
+        self.cycle_seen = 0
+        self.status_c: int | None = None
+        self.checked: dict = {}
         self.inj = None
         if status_replay:
             self.inj = canio.DedupBus(interface, channel or canio.GROUP)

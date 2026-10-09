@@ -364,7 +364,8 @@ class CFmuTests(unittest.TestCase):
         sys.path.insert(0, str(ROOT / "scripts"))
         import build_c_fmu
         srcs = [*(ROOT / "hil" / "SafeStopCore" / "src").glob("ssc_core.*"), ROOT / "fmu" / "c_src" / "SafeStopVecuC.cpp",
-                ROOT / "scripts" / "build_c_fmu.py", ROOT / "ssb" / "fmu_contract.py", *(ROOT / "config").glob("*.json")]
+                ROOT / "scripts" / "build_c_fmu.py", ROOT / "ssb" / "fmu_contract.py",
+                *(ROOT / "config" / f"{c}.json" for c in build_c_fmu.CONFIGS)]   # only the bundled configs (not can_ids.json)
         if not build_c_fmu.OUT.exists() or build_c_fmu.OUT.stat().st_mtime < max(f.stat().st_mtime for f in srcs):
             build_c_fmu.build()
         from ssb.dut import FmuDUT
@@ -873,6 +874,88 @@ class NativeHilTests(unittest.TestCase):
         self.assertEqual(failed, [])
         self.assertIsNotNone(r["bench_lag_ms"])
         print(f"\n  emulated HiL run: bench lag {r['bench_lag_ms']} ms (<= 5 ms needed for a trusted verdict)")
+
+
+class CanIdRegistryTests(unittest.TestCase):
+    """config/can_ids.json is the one list of IDs on the bench bus (v2.13): the DBC, the C++ core and the Python bench must agree
+    with it, so merging another project onto the wire (UDS, attack injection, OTA) cannot reuse an ID by accident."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        import re
+        cls.reg = json.loads((ROOT / "config" / "can_ids.json").read_text(encoding="utf-8"))
+        cls.active = {int(e["id"], 16): e["name"] for e in cls.reg["ids"] if e["status"] == "active"}
+        cls.reserved = {int(e["id"], 16) for e in cls.reg["ids"] if e["status"] == "reserved"}
+        dbc = (ROOT / "dbc" / "safe_stop.dbc").read_text(encoding="utf-8")
+        cls.dbc = {int(i): n for i, n in re.findall(r"^BO_ (\d+) (\w+):", dbc, flags=re.M)}
+        core = (ROOT / "hil" / "SafeStopCore" / "src" / "ssc_core.h").read_text(encoding="utf-8")
+        cls.core = {n: int(v, 16) for n, v in re.findall(r"\b(\w+_ID) = (0x[0-9A-Fa-f]+)", core)
+                    if n != "DATA_ID"}   # DATA_ID = the Profile 5 E2E data ID, not a CAN ID
+
+    def test_ids_are_unique(self):
+        ids = [int(e["id"], 16) for e in self.reg["ids"]]
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_dbc_matches_the_active_ids(self):
+        self.assertEqual(self.dbc, self.active)
+
+    def test_reserved_ids_are_not_in_the_dbc(self):
+        self.assertFalse(self.reserved & set(self.dbc))
+
+    def test_cpp_core_uses_registered_ids(self):
+        self.assertEqual(set(self.core), {"CMD_ID", "ACT_ID", "STATUS_ID"})
+        self.assertLessEqual(set(self.core.values()), set(self.active))
+
+    def test_python_bench_uses_registered_ids(self):
+        from ssb import canio, planner, plant
+        self.assertEqual(set(canio.ID.values()), set(self.active))
+        self.assertLessEqual({e2e.STATUS_ID, planner.CMD_ID, plant.ACT_ID}, set(self.active))
+
+    def test_known_clashes_stay_off_this_bus(self):
+        taken = set(self.active) | self.reserved
+        for e in self.reg["elsewhere"]:
+            if int(e["id"], 16) in taken:
+                self.assertFalse(e["on_this_bus"], e)
+
+
+class TraceabilityV213Tests(unittest.TestCase):
+    def test_sr19_is_traced_to_existing_tests(self):
+        mod = sys.modules[__name__]
+        for name in REQS["SR-19"]["verified_by"]:
+            parts = name.split(".")[2:]            # tests.test_bench_v2.<Class>[.<method>]
+            obj = getattr(mod, parts[0])
+            if len(parts) > 1:
+                obj = getattr(obj, parts[1])
+            self.assertTrue(callable(obj), name)
+
+    def test_gaps_list_test_only_requirements_apart(self):
+        g = campaigns.gaps(CFG)
+        self.assertIn("SR-19", g["requirements_verified_by_tests_only"])
+        self.assertNotIn("SR-19", g["requirements_without_scenario"])
+
+
+class ManifestTests(unittest.TestCase):
+    def test_manifest_records_the_run_and_hashes_its_files(self):
+        import json
+        import tempfile
+        from datetime import datetime
+
+        from ssb import report
+        results = campaigns.matrix(CFG, lambda sc: ReferenceDUT(CFG), only=["command_link_lost", "single_bad_frame"])
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            report.write_all(out, results, {"requirements": campaigns.requirements(), "config_name": CFG["name"],
+                                            "chart_keys": [], "gaps": campaigns.gaps(CFG), "ftti": []}, "t")
+            p = report.write_manifest(out, "t", results, {"level": "reference"}, datetime.now(), None)
+            m = json.loads(p.read_text(encoding="utf-8"))
+            self.assertEqual(p.name, "t_manifest.json")
+            self.assertEqual(m["summary"], {"total": 2, "passed": 2, "known": 0, "failed": 0})
+            self.assertEqual(set(m["files"]), {"t_results.json", "t_junit.xml", "t.html",
+                                               "traces/command_link_lost.csv", "traces/single_bad_frame.csv"})
+            self.assertEqual(m["files"]["t_junit.xml"], report._sha256(out / "t_junit.xml"))
+            self.assertTrue(m["run_id"].endswith("_t"))
+            self.assertEqual(m["run"]["level"], "reference")
 
 
 if __name__ == "__main__":

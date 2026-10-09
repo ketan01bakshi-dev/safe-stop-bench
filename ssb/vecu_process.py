@@ -46,6 +46,7 @@ def main() -> None:
 
     def run_cycles() -> None:
         nonlocal next_cycle, pending, status_ctr
+        assert sc is not None   # only called after BENCH_Reset created the controller
         sc.brownout(t_now, not power_ok)
         sc.tx_ok = tx_ok
         while next_cycle <= t_now:
