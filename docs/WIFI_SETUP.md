@@ -1,111 +1,115 @@
-# Switch on board B's own Wi-Fi radio (v2.28)
+# Board B's own Wi-Fi radio, with your Mosquitto and TLS (v2.30)
 
-Board B (the safety controller, an ESP32-S3) can receive its firmware updates over your Wi-Fi instead of the USB cable. This page
-is the whole set-up, in the order to do it. **You type the passwords in your own terminal; nothing here asks you to paste a
-password into a chat, a file or the repo.**
+Board B (the safety controller, an ESP32-S3) receives its firmware updates over your Wi-Fi instead of the USB cable. The link is
+**encrypted (TLS)**, the board **only trusts a broker certificate signed by a private CA that you make and pin on the board**, and it
+logs in with a user name and password that only exist inside that encrypted link. **You type the passwords in your own terminal;
+nothing here asks you to paste a password into a chat, a file or the repo.**
 
-## What you need, and where each thing comes from
+```
+board B  --Wi-Fi 2.4 GHz-->  your router  -->  this PC (192.168.1.6)
+                                                 Mosquitto service
+                                                   port 1883  anonymous, localhost use      (your other projects: unchanged)
+                                                   port 8883  TLS + login, topics ssb/# only (the boards)
+```
 
-| Thing | Where it comes from |
-|---|---|
-| Wi-Fi name and password | Your own router. Printed on its label, or in its admin page. It must be the **2.4 GHz** network (the ESP32-S3 has no 5 GHz). Use your main network, not the guest network (guest networks usually stop devices talking to your PC). A phone hotspot set to 2.4 GHz also works if this PC joins it too. |
-| This PC's address on that network | `python -m fleet.broker addresses` (step 3). Give this PC a fixed address in the router ("DHCP reservation") so it does not change. |
-| Broker user name and password | **You make them up** (step 2). They are not from any service. 8+ characters. |
-| Board id | You choose; the default `board-b` is fine. It is only a name in the MQTT topics. |
+## Where each thing comes from, and where it ends up
 
-## Where the passwords end up
-
-| Where | What | In git? |
+| Thing | Comes from | Ends up |
 |---|---|---|
-| The board's flash (NVS), via USB | Wi-Fi name and password, broker address, user and password | no, it is on the board |
-| `secrets/broker_passwd` on this PC | the broker login as an **argon2 hash**, never the password | no, `secrets/` is git-ignored |
-| The firmware images in `fleet/images/` | nothing: no secret is compiled in | not tracked |
-| Your terminal session | the environment variables, only while that terminal is open | no |
-
-The board stores the Wi-Fi password in plain form in its flash. Anyone holding the board and a USB cable can read it out. That is
-acceptable for a bench; a product would encrypt the flash.
+| Wi-Fi name and password | your router (its label or admin page). Must be the **2.4 GHz** network; not a guest network | the board's flash only |
+| This PC's address | `192.168.1.6` today. **Reserve it in the router** (DHCP reservation): the certificate names this address | inside the broker certificate and the board's settings |
+| Broker login | **you make it up** (8+ characters), in step 2 | hashed in `C:\Program Files\Mosquitto\ssb\passwd`; the board's flash |
+| CA certificate `ca.pem` (public) | `python -m fleet.certs make` | the board's flash, and the PC test tools |
+| CA key `ca.key` (SECRET) | the same command | `secrets\tls\` on this PC, git-ignored. Never copied anywhere; only needed to issue a new broker certificate |
+| Broker certificate and key `server.pem`, `server.key` | the same command | `secrets\tls\` and `C:\Program Files\Mosquitto\ssb\` (the key readable by SYSTEM and Administrators only) |
 
 ## Steps
 
-All commands are PowerShell, run from the bench's top folder (the one with `run.py` in it).
+All commands are PowerShell, run from the bench's top folder (the one with `run.py` in it), as yourself unless it says Administrator.
 
-**0. Put the Wi-Fi firmware on board B (once, by cable).** The firmware running on B now has no Wi-Fi code, so this one step needs
-the cable. It also resets B to the 2.10 baseline the matrix starts from.
+**0. Wi-Fi firmware on board B (done).** B runs the 2.10 baseline with the Wi-Fi/TLS firmware and has nothing provisioned. To redo it:
+`.\.venv\Scripts\python.exe scripts\hil_flash.py --b COM13`.
 
-```powershell
-.venv\Scripts\python.exe scripts\hil_flash.py --b COM13
-```
+**1. Certificates (done for 192.168.1.6).** They exist in `secrets\tls\`. Look: `.\.venv\Scripts\python.exe -m fleet.certs show`. If this PC's
+address ever changes, make new ones (every board then needs the new `ca.pem`, step 3):
+`.\.venv\Scripts\python.exe -m fleet.certs make --host <new address> --force`.
 
-**1. Check the network.** Make sure this PC and the board will be on the same 2.4 GHz network, and that Windows calls it
-**Private** (Settings, Network and internet, Wi-Fi, your network, Network profile type: Private).
-
-**2. Make the broker login.** It asks for a password twice, hidden:
+**2. Add the boards' listener to Mosquitto. Open PowerShell as Administrator**, go to the bench folder, and first look without changing anything:
 
 ```powershell
-.venv\Scripts\python.exe -m fleet.broker login --user ssb
+.\scripts\setup_mosquitto_tls.ps1 -DryRun
 ```
 
-**3. Find this PC's address:**
+Then, when you are happy with the plan:
 
 ```powershell
-.venv\Scripts\python.exe -m fleet.broker addresses
+.\scripts\setup_mosquitto_tls.ps1
 ```
 
-The first line is normally right (for example `192.168.1.20`).
+It backs up `mosquitto.conf`, copies the certificates, asks you for the **broker password** (twice, hidden), writes the access rules,
+adds one marked block to the config, restarts the service (your port-1883 clients reconnect after a few seconds), **restores your old
+config by itself if the service fails to start**, and adds a Windows Firewall rule for TCP 8883 on Private networks only. Run it again
+any time: the block is replaced, not repeated.
 
-**4. Let the board in through the Windows firewall.** Once, in a PowerShell **run as Administrator**. Private networks only:
+**3. Give board B its settings** (close anything else that uses COM13):
 
 ```powershell
-New-NetFirewallRule -DisplayName "ssb-mqtt" -Direction Inbound -Protocol TCP -LocalPort 1884 -Action Allow -Profile Private
+.\.venv\Scripts\python.exe scripts\provision_wifi.py --port COM13
 ```
 
-**5. Start the broker** in its own terminal (port 1884, because another broker such as Mosquitto often owns the standard 1883) and leave it running:
+It asks for, in this order: the network name (type it exactly as your router shows it), the Wi-Fi password (hidden), "encrypt with TLS?"
+(answer `1`), this PC's address (accept `192.168.1.6`), port (accept `8883`), user (`ssb`), the **broker password from step 2** (hidden), board id
+(accept `board-b`). It uploads the CA certificate first, then the settings, then waits up to 45 seconds and prints
+`OK: the board is on the network and connected to the broker`. Check any time, with no password shown: `--info`.
+
+**4. Run the update tests over Wi-Fi with TLS:**
 
 ```powershell
-.venv\Scripts\python.exe -m fleet.broker serve
+.\.venv\Scripts\python.exe -m fleet.ota_matrix --real COM13 --wifi --broker 127.0.0.1:8883 --tls-ca
 ```
 
-**6. Give the board its settings** (another terminal; close anything else that has COM13 open). It asks for each item; the two
-passwords are typed hidden:
+It asks for the broker password (hidden), checks the broker's certificate against `ca.pem` as the PC side of the test, resets the board over the USB
+cable (test equipment) and sends the images over Wi-Fi. Expect about 15 minutes (measured: each full push takes 70 to 100 seconds); it prints each result as it finishes and a progress line every 500 chunks. After a pass, `python -m fleet.release` counts it as evidence
+and the standing limit changes from "no encryption" to the smaller list under "What it does not protect against".
 
-```powershell
-.venv\Scripts\python.exe scripts\provision_wifi.py --port COM13
-```
+**To forget everything on the board:** `scripts\provision_wifi.py --port COM13 --clear` (the radio then never starts).
 
-It then waits up to 45 s and prints `OK: the board is on the network and connected to the broker.` To check any time, with no
-passwords shown: `scripts\provision_wifi.py --port COM13 --info`. To try your entries against the board's limits without sending
-anything: `--dry-run`.
+## What the board checks
 
-**7. Run the update tests over Wi-Fi.** Stop the broker from step 5 first (the test starts its own on the same port). The matrix asks for the broker
-password, hidden:
+1. It joins the Wi-Fi network you gave it.
+2. It opens TLS to the address in its settings and demands a certificate **signed by the pinned CA** and **naming that address**. A broker with any other
+   certificate (including a real, publicly signed one) is refused: the board carries no public CA list.
+3. Only then does it send its login. The password never travels in the clear.
+4. Mosquitto lets that login read and write `ssb/#` and nothing else.
+5. TLS with no CA stored is refused rather than downgraded: the radio simply stays off.
 
-```powershell
-.venv\Scripts\python.exe -m fleet.ota_matrix --real COM13 --wifi
-```
+## What it does not protect against (and what would)
 
-It resets the board over the USB cable (an EN-pin pulse is test equipment, not part of an update) and sends every image over
-Wi-Fi. A full REL-01..10 run pushes an image of about 1 MB several times; plan on 10 to 25 minutes. When it ends 10/10,
-`python -m fleet.release` counts it as evidence.
-
-**To forget the network:** `scripts\provision_wifi.py --port COM13 --clear`. With nothing provisioned the radio never switches on.
+- **The certificates start in 1970.** The ESP32 has no clock; after power-up it thinks it is 1 January 1970, and TLS rejects a certificate that is "not yet
+  valid". So the board cannot notice an expired certificate (they end in 2049). *Fix:* give the board a time source (NTP) and issue certificates with real dates.
+- **One login for every board.** *Fix:* a login per board, each limited to its own `ssb/ota/<id>/#`.
+- **The CA key lives on this PC.** Anyone who gets `secrets\tls\ca.key` can make a broker the boards will trust. Keep that folder private (it is git-ignored).
+- **Credentials in the board's flash are not encrypted.** Someone holding the board and a USB cable can read the Wi-Fi password out. *Fix:* flash encryption.
+- The signature check on each firmware image is the real guard: an attacker who defeats the link still cannot install an image the key did not sign.
 
 ## If it does not connect
 
 | Symptom | Likely cause |
 |---|---|
-| "did not join the network" | 5 GHz network; wrong name or password (names are case-sensitive); a guest network; WPA3-only network (use WPA2/WPA3 mixed) |
-| Joined, but "not on the broker" | the broker is not running (step 5); the address is not this PC's; user or password differ from step 2; the firewall rule is missing, or the network is not "Private" |
-| Joined and on the broker, but the matrix times out | something else is using port 1884 (an old broker): `Get-NetTCPConnection -LocalPort 1884` |
-| "no answer to the network set-up message" | board B is not running the Wi-Fi firmware: redo step 0 |
-| It worked, then the board vanished | the radio is **off while a scenario runs** by design, and returns 2 s after it ends |
+| "did not join the network" | 5 GHz network; wrong name or password (case-sensitive); guest network; WPA3-only (use WPA2 or mixed) |
+| Joined, "not on the broker" | firewall rule missing (step 2 adds it; check `Get-NetFirewallRule -DisplayName ssb-mqtt-tls`); network profile not **Private**; the address in the settings is not this PC's |
+| Joined, broker refuses | wrong user or password; or the certificate does not name the address the board connects to (this PC's address changed): `fleet.certs show`, then redo steps 1 to 3 |
+| The service did not start after step 2 | the script restored your old config; look at the message it printed. Your backup is `mosquitto.conf.bak-<time>` |
+| `--info` says "TLS ON BUT NO CA STORED" | provisioning was interrupted: run `scripts\provision_wifi.py` again |
+| "no answer to the network set-up message" | board B is not running the Wi-Fi firmware: step 0 |
+| Worked, then the board vanished | by design the radio is **off while a scenario runs** and returns 2 s after it ends |
 
-## What to know before you rely on it
+## Notes
 
-- **Plain MQTT, no TLS.** The signature protects the *image*: someone on your network can stop an update, not forge one. Do not
-  expose the broker to the internet or to a network you do not trust. TLS with a pinned certificate and one login per board is the
-  next step.
-- **The radio is a guest on a safety controller.** It runs in its own tasks, is off while a scenario runs, and a board with
-  nothing provisioned never starts it. The release report lists these limits.
-- **The firmware grew from about 350 KB to about 1 MB** (the network stack), 78 % of the 1.25 MB update slot, so an update takes
-  roughly three times as long as before and there is limited room left.
-- Credentials are accepted **over USB only**, never over the network they configure.
+- **Mosquitto 2.1 warnings.** Start-up logs two deprecation notices: `per_listener_settings` goes away in Mosquitto 3.0 (where password and ACL plugins
+  take over), and your own `allow_anonymous true` line has a newer spelling. Both still work; nothing here changed your 1883 listener.
+- **Only board B has a radio.** B receives updates; A (the bus observer) has nothing to update and its CAN receive timing matters (a late wake loses a frame;
+  see `CHANGES_V2.md`, v2.29), and the Wi-Fi stack shares its processor core. Putting A on the network would be separate work.
+- **The firmware is about 1 MB** (78 % of the 1.25 MB update slot), so a push is about 5150 chunks.
+- **Without Mosquitto:** `python -m fleet.broker login` / `serve` runs a small stand-alone broker on port 1884 (plain MQTT, for a first test or CI) and
+  `fleet.ota_matrix --real COM13 --wifi` starts one by itself. Use the TLS route above for anything you leave running.

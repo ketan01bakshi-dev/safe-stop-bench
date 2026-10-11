@@ -182,6 +182,14 @@ Set-up, credentials and troubleshooting: **`docs/WIFI_SETUP.md`**.
   `--emulated --wifi` runs the same code path against a stand-in board with a login-protected broker (CI).
 - **Cost:** the firmware grew from about 350 KB to about 1 MB (78 % of the 1.25 MB slot), so a push is about 5150 chunks.
 
+**TLS (v2.30).** The link is encrypted and the board trusts only a broker certificate signed by a private CA pinned in its flash (uploaded over
+USB, `fleet/certs.py`); the broker is the Mosquitto service with one extra listener (`scripts/setup_mosquitto_tls.ps1`). `ota_matrix --real COM13
+--wifi --broker 127.0.0.1:8883 --tls-ca` runs the sequence over it. The certificates start in 1970 because the board has no clock (it therefore cannot
+notice an expired one); the release decision states that limit.
+
+**Run on the real board (v2.31).** REL-01..10 pass over the board's own Wi-Fi with TLS (about 15 minutes). The OTA data path runs at QoS 0 on that
+link and the board answers at once: with QoS 1 each chunk took 250 ms (1.3 s before replies were sent at once), QoS 0 takes 12 ms. See `CHANGES_V2.md`, v2.31.
+
 Verified on the real board without a network: provisioning, INFO, a USB update that still **commits** with the radio retrying (the
 health check needs free heap, and the network stack uses a lot), and three HiL scenarios unchanged. The run over a real Wi-Fi network
 needs your credentials and is recorded as `ota_matrix_real_wifi` once you have run it.

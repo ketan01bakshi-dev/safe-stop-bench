@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import faulthandler
 import json
 import os
 import sys
@@ -43,8 +44,12 @@ class Dev:
     arm_cut: Callable[[int], object] = lambda n: None
     hello_s: float = 10.0   # how long to wait for a board's hello after a boot: over Wi-Fi the board must join the network and the broker first   # emulated boards cut at the nth END write; a real board has the cut compiled into its image
 
-    def client(self, **kw: float) -> OtaClient:
-        return OtaClient(self.link, **kw)
+    def client(self, **kw: Any) -> OtaClient:
+        if self.kind == "real+wifi":   # measured on the real board: first replies after BEGIN take about 1.25 s, the worst 2.5 s
+            kw = {"timeout_s": 4.0, "chunk_retries": 3, **kw}
+        c = OtaClient(self.link, **kw)
+        c.progress = not self.kind.startswith("emulated")
+        return c
 
 
 def emulated(name: str = "emu-1", version: str = "2.10") -> Dev:
@@ -62,7 +67,7 @@ def real(port: str) -> Dev:
 
 
 def over_mqtt(dev: Dev, port: int, *, wifi: bool = False, user: str | None = None, password: str | None = None,
-              device: str | None = None) -> tuple[Dev, Callable[[], None]]:
+              device: str | None = None, host: str = "127.0.0.1", ca: str | None = None) -> tuple[Dev, Callable[[], None]]:
     """The same board, reached through the broker. Returns (device, cleanup).
 
     Default: a Gateway on this PC in front of the board, an MqttLink for the client (the board has no radio of its own).
@@ -74,7 +79,8 @@ def over_mqtt(dev: Dev, port: int, *, wifi: bool = False, user: str | None = Non
     device = device or dev.name
     emu = dev.kind == "emulated"
     if wifi and not emu:
-        link = MqttLink(device, port, user=user, password=password, reset_hook=dev.hard_reset)
+        link = MqttLink(device, port, host=host, user=user, password=password, reset_hook=dev.hard_reset, ca=ca)
+        link.to_board_qos = 0   # measured on the real board: QoS 1 both ways is 250 ms per chunk, QoS 0 both ways 12 ms (the board's replies are QoS 0 too)
         wrapped = Dev(device, link, time.sleep, dev.hard_reset, "real+wifi", lambda n: None, hello_s=45.0)
 
         def cleanup_wifi() -> None:
@@ -83,8 +89,8 @@ def over_mqtt(dev: Dev, port: int, *, wifi: bool = False, user: str | None = Non
             if close:
                 close()
         return wrapped, cleanup_wifi
-    gw = Gateway(device, dev.link, port, user=user, password=password, hello_on_connect=wifi)
-    link = MqttLink(device, port, user=user, password=password)
+    gw = Gateway(device, dev.link, port, host=host, user=user, password=password, hello_on_connect=wifi, ca=ca)
+    link = MqttLink(device, port, host=host, user=user, password=password, ca=ca)
     wait = link.advance if emu else time.sleep
     arm = (lambda n: link.control(f"cut {n}")) if emu else (lambda n: None)
     wrapped = Dev(device, link, wait, lambda: link.reset_board(), f"{dev.kind}+{'wifi' if wifi else 'mqtt'}", arm)
@@ -172,6 +178,9 @@ def run_all(dev: Dev, imgs: dict[str, SignedImage]) -> list[dict]:
 
     def row(rid: str, title: str, ok: bool, evidence: str) -> None:
         rows.append({"id": rid, "title": title, "ok": bool(ok), "evidence": evidence})
+        print(f"  {rid} {'PASS' if ok else 'FAIL'}  {title}  ({evidence})", flush=True)   # progress: a real run takes many minutes
+        if not dev.kind.startswith("emulated"):
+            faulthandler.dump_traceback_later(600, repeat=True)   # re-armed on progress: it only fires when no scenario finishes for 10 minutes
 
     def safe(hello: str) -> bool:
         return "restored" in hello
@@ -276,13 +285,23 @@ def render(rows: list[dict], where: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _settle(dev: Dev, c: OtaClient, seconds: float) -> str:
-    """Read what the board says for a while and return its LAST hello: after a cut it may boot twice (new image, then the rollback)."""
-    end = time.time() + seconds
-    while time.time() < end:
+def _settle(dev: Dev, c: OtaClient, seconds: float, quiet_s: float = 0.0) -> str:
+    """Read what the board says for a while and return its LAST hello: after a cut it may boot twice (new image, then the rollback).
+
+    `quiet_s` > 0 (the board is on the network): over Wi-Fi the hello only comes after the board has joined the network and the broker, and
+    a boot that rolls back in 3 s never gets that far. Wait up to `seconds` for a hello, then until `quiet_s` pass without another."""
+    start = time.time()
+    last_hello = 0.0
+    while True:
+        now = time.time()
+        if now - start >= seconds:
+            break
+        if quiet_s and last_hello and now - last_hello >= quiet_s:
+            break
         for kind, p in c.parser.feed(dev.link.read()):
             if kind == "H":
                 c.hello = p.decode(errors="replace")
+                last_hello = time.time()
         time.sleep(0.05)
     return c.hello or ""
 
@@ -318,7 +337,10 @@ def run_cut_windows(dev: Dev, imgs: dict[str, SignedImage]) -> list[dict]:
         dev.arm_cut(n)
         c.forget_hello()
         r = c.push(imgs["bad"])
-        hello = _settle(dev, c, 7.0 if dev.kind.startswith("real") else 0.3)
+        if dev.kind == "real+wifi":
+            hello = _settle(dev, c, 90.0, quiet_s=12.0)
+        else:
+            hello = _settle(dev, c, 7.0 if dev.kind.startswith("real") else 0.3)
         st = c.status()
         runs = _version_of(hello)
         ok = (ok_in or n > 1) and r.outcome == "lost" and runs == f"2.{30 + n}" and "restored" in hello and st["state"] != "TRIAL"
@@ -334,6 +356,7 @@ def run_cut_windows(dev: Dev, imgs: dict[str, SignedImage]) -> list[dict]:
 
 
 def main() -> int:
+    faulthandler.dump_traceback_later(600, repeat=True)   # a run that stalls prints where, every 10 minutes
     ap = argparse.ArgumentParser()
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--emulated", action="store_true")
@@ -343,6 +366,11 @@ def main() -> int:
     ap.add_argument("--cut-windows", action="store_true", help="run REL-11 / REL-12 (power lost at each final write of an update) instead of REL-01..10")
     ap.add_argument("--wifi", action="store_true", help="the board is on the network itself (provision it first: scripts/provision_wifi.py): "
                     "this PC runs a login-protected broker on the LAN and the update traffic goes over Wi-Fi. With --emulated, a stand-in board.")
+    ap.add_argument("--broker", metavar="HOST:PORT", help="with --wifi or --mqtt: use this EXISTING broker (for example the Mosquitto service) instead of "
+                    "starting one. Login from SSB_MQTT_USER / a hidden prompt for the password, or none if the broker is anonymous (--anonymous).")
+    ap.add_argument("--anonymous", action="store_true", help="with --broker: connect without a login")
+    ap.add_argument("--tls-ca", metavar="CA.PEM", nargs="?", const="default",
+                    help="with --broker: speak TLS and require the broker certificate to be signed by this CA (default secrets/tls/ca.pem)")
     ap.add_argument("--mqtt", action="store_true", help="reach the board through a local MQTT broker and a gateway instead of the direct link")
     a = ap.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
@@ -361,7 +389,35 @@ def main() -> int:
         dev, imgs, where = (emulated(), images_emulated(), "emulated") if a.emulated else (real(a.real), images_real(), f"real board {a.real}")
     cleanup: Callable[[], None] = lambda: None   # noqa: E731
     broker = None
-    if a.wifi:
+    ext_host = "127.0.0.1"
+    if a.broker:
+        import getpass
+        if not (a.wifi or a.mqtt):
+            raise SystemExit("--broker goes with --wifi or --mqtt")
+        host_s, _, port_s = a.broker.rpartition(":")
+        if not host_s or not port_s.isdigit():
+            raise SystemExit("--broker wants HOST:PORT, for example 192.168.1.6:1883")
+        ext_host, ext_port = host_s, int(port_s)
+        user, password, device = (None, None, "board-b")
+        if not a.anonymous:
+            user = os.environ.get("SSB_MQTT_USER", "ssb")
+            password = os.environ.get("SSB_MQTT_PASS") or (getpass.getpass(f"password for '{user}' on {a.broker} (hidden): ") if sys.stdin.isatty() else "")
+        if a.wifi and not a.emulated:
+            from .provision import Provisioner, describe
+            info = Provisioner(dev.link).info()
+            print(describe(info))
+            if not info.provisioned:
+                raise SystemExit("board B has no network settings: run scripts/provision_wifi.py --port " + a.real)
+            device = info.device
+        ca = None
+        if a.tls_ca:
+            from .certs import DEFAULT_DIR
+            ca = str(DEFAULT_DIR / "ca.pem") if a.tls_ca == "default" else a.tls_ca
+            if not Path(ca).exists():
+                raise SystemExit(f"{ca} not found: python -m fleet.certs make --host <this PC's address>")
+        where += f" via the existing broker {a.broker}" + (" (anonymous)" if a.anonymous else "") + (" over TLS" if ca else "")
+        dev, cleanup = over_mqtt(dev, ext_port, wifi=a.wifi, user=user, password=password, device=device, host=ext_host, ca=ca)
+    elif a.wifi:
         import tempfile
 
         from . import broker as brk
@@ -392,7 +448,7 @@ def main() -> int:
             print(f"broker up for the LAN on port {broker.port}; the board must reach {', '.join(brk.lan_addresses())}")
             where += " over its own Wi-Fi radio (login-protected broker on this PC)"
         dev, cleanup = over_mqtt(dev, broker.port, wifi=True, user=user, password=password, device=device)
-    elif a.mqtt:
+    elif a.mqtt and not a.broker:
         from .mqtt_link import LocalBroker
         broker = LocalBroker().start()
         dev, cleanup = over_mqtt(dev, broker.port)
@@ -404,7 +460,7 @@ def main() -> int:
         if broker:
             broker.stop()
     OUT.mkdir(parents=True, exist_ok=True)
-    tag = ("emulated" if a.emulated else "real") + ("_wifi" if a.wifi else "_mqtt" if a.mqtt else "")
+    tag = ("emulated" if a.emulated else "real") + ("_wifi" if a.wifi else "_mqtt" if a.mqtt else "") + ("_tls" if a.tls_ca else "")
     stem = "ota_cut" if a.cut_windows else "ota_matrix"
     (OUT / f"{stem}_{tag}.json").write_text(json.dumps(rows, indent=1), encoding="utf-8")
     text = render(rows, where)

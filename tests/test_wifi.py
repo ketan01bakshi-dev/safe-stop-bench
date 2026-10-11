@@ -70,16 +70,40 @@ class FirmwareContractTests(unittest.TestCase):
         self.assertEqual(sizes, list(provision.LIMITS.values()))
 
     def test_ops_and_statuses_match(self):
-        self.assertIn("enum Op : uint8_t { SET = 1, CLEAR = 2, INFO = 3 };", self.h)
-        self.assertEqual((provision.SET, provision.CLEAR, provision.INFO), (1, 2, 3))
-        self.assertIn("enum Status : uint8_t { OK = 0, BAD_MESSAGE = 1, TOO_LONG = 2, NO_STORE = 3 };", self.h)
-        self.assertEqual(provision.STATUS, {0: "OK", 1: "BAD_MESSAGE", 2: "TOO_LONG", 3: "NO_STORE"})
+        self.assertIn("enum Op : uint8_t { SET = 1, CLEAR = 2, INFO = 3, CA_BEGIN = 4, CA_CHUNK = 5, CA_END = 6 };", self.h)
+        self.assertEqual((provision.SET, provision.CLEAR, provision.INFO, provision.CA_BEGIN, provision.CA_CHUNK, provision.CA_END), (1, 2, 3, 4, 5, 6))
+        self.assertIn("enum Status : uint8_t { OK = 0, BAD_MESSAGE = 1, TOO_LONG = 2, NO_STORE = 3, BAD_CA = 4 };", self.h)
+        self.assertEqual(provision.STATUS, {0: "OK", 1: "BAD_MESSAGE", 2: "TOO_LONG", 3: "NO_STORE", 4: "BAD_CA"})
+        self.assertIn(f"static const size_t CA_MAX = {provision.CA_MAX};", self.h)
+
+    def test_tls_is_pinned_to_the_uploaded_ca_and_never_falls_back_to_plain(self):
+        self.assertIn("MQTT_TRANSPORT_OVER_SSL", self.h)
+        self.assertIn("cfg.broker.verification.certificate = ca_pem;", self.h)
+        self.assertRegex(self.h, r"if \(tls && ca_len == 0\) return;")
+        self.assertNotIn("skip_cert_common_name_check", self.h, "the address check stays on")
+        self.assertNotIn("use_global_ca_store", self.h, "no public CA store: only the uploaded CA is trusted")
+
+    def test_clear_forgets_the_tls_state_in_memory_too(self):
+        clear = self.h[self.h.index("case CLEAR:"):self.h.index("case CA_BEGIN:")]
+        for needle in ("tls = false;", "ca_len = ca_want = ca_have = 0;", "memset(ca_pem"):
+            self.assertIn(needle, clear)
 
     def test_provisioning_is_accepted_over_usb_only(self):
         """Credentials are never accepted over the network they configure: 'N' is handled in the serial branch, the MQTT branch takes 'U' only."""
         self.assertIn("else if (ota_parser.type == 'N') net::handle(", self.ino)
         self.assertIn("net_parser.type != 'U'", self.ino)
         self.assertEqual(self.ino.count("net::handle("), 1)
+
+    def test_the_ota_reply_is_sent_at_once_and_at_qos_0(self):
+        """Measured on the real board (v2.31): enqueue (sent when the MQTT task next wakes) cost ~1 s per chunk, and a QoS 1 reply made the
+        broker's PUBACK hold the next chunk back for the board's delayed ACK (250 ms). Replies go out at once, at QoS 0."""
+        reply = self.h[self.h.index("static void publish("):self.h.index("static bool take_str(")]
+        self.assertIn("esp_mqtt_client_publish(cli, t_from, (const char *)d, (int)n, 0, 0)", reply)
+        self.assertNotIn("esp_mqtt_client_enqueue", reply)
+
+    def test_the_wifi_link_to_the_real_board_uses_qos_0(self):
+        text = (ROOT / "fleet" / "ota_matrix.py").read_text(encoding="utf-8")
+        self.assertIn("link.to_board_qos = 0", text)
 
     def test_the_radio_is_off_while_a_scenario_runs(self):
         self.assertIn("net::poll(!(node.active() && pc_session), fw);", self.ino)
@@ -136,6 +160,56 @@ class ProvisionerAgainstTheEmulatedBoardTests(unittest.TestCase):
         self.assertTrue(any(k == "n" and p[1] != 0 for k, p in msgs), msgs)
         self.assertEqual(emu.net, {})
 
+    def test_the_ca_certificate_is_uploaded_in_chunks_and_reported_as_stored(self):
+        from fleet import certs
+        ca_pem = certs.pem(certs.make_ca()[0])
+        emu = EmuBoard("e", "2.10")
+        p = Provisioner(emu, timeout_s=1.0)
+        p.set_ca(ca_pem)
+        p.set(**GOOD, tls=True)
+        info = p.info()
+        self.assertTrue(info.tls and info.ca_stored)
+        self.assertEqual(info.ca_len, len(ca_pem))
+        self.assertEqual(emu.net["ca"], ca_pem, "stored byte for byte")
+        self.assertIn("TLS, CA pinned", provision.describe(info))
+        self.assertGreaterEqual(len(ca_pem) // provision.CA_CHUNK_BYTES, 5, "and it really took several chunks")
+
+    def test_tls_without_a_ca_is_reported_loudly(self):
+        emu = EmuBoard("e", "2.10")
+        p = Provisioner(emu, timeout_s=1.0)
+        p.set(**GOOD, tls=True)
+        self.assertIn("NO CA STORED", provision.describe(p.info()))
+
+    def test_a_private_key_or_a_non_certificate_is_never_sent(self):
+        from fleet import certs
+        key = certs.key_pem(certs.make_ca()[1])
+        emu = EmuBoard("e", "2.10")
+        tiny = b"-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n"
+        for bad, needle in ((key, "PRIVATE KEY"), (b"hello", "not a PEM"), (tiny, "bytes")):
+            with self.subTest(needle=needle), self.assertRaisesRegex(ProvisionError, needle):
+                Provisioner(emu, timeout_s=1.0).set_ca(bad)
+        self.assertEqual(emu.net, {}, "nothing reached the board")
+
+    def test_an_interrupted_upload_does_not_replace_a_stored_ca(self):
+        from fleet import certs
+        from ssb.hil import frame_msg
+        emu = EmuBoard("e", "2.10")
+        p = Provisioner(emu, timeout_s=1.0)
+        good = certs.pem(certs.make_ca()[0])
+        p.set_ca(good)
+        emu.write(frame_msg("N", bytes([provision.CA_BEGIN]) + (len(good)).to_bytes(2, "little")), 0)   # a second upload starts and never finishes
+        emu.write(frame_msg("N", bytes([provision.CA_END])), 0)
+        self.assertEqual(emu.net["ca"], good)
+
+    def test_clear_forgets_the_ca_too(self):
+        from fleet import certs
+        emu = EmuBoard("e", "2.10")
+        p = Provisioner(emu, timeout_s=1.0)
+        p.set_ca(certs.pem(certs.make_ca()[0]))
+        p.set(**GOOD, tls=True)
+        p.clear()
+        self.assertFalse(p.info().ca_stored)
+
     def test_a_silent_board_gives_a_helpful_error(self):
         class Silent:
             def write(self, d, n=0): pass
@@ -189,6 +263,24 @@ class BrokerLoginTests(unittest.TestCase):
             bad = [r["id"] for r in rows if not r["ok"]]
             self.assertEqual(bad, [], rows)
             self.assertTrue(time.time() > 0)
+
+
+    @unittest.skipUnless(HAVE_MQTT, "pip install -e .[fleet]")
+    def test_the_update_runs_through_an_existing_broker_given_by_host_and_port(self):
+        """--broker HOST:PORT: no broker is started by the matrix; an anonymous broker on some host:port is just used."""
+        from fleet.mqtt_link import LocalBroker
+        with LocalBroker() as existing:   # stands in for the Mosquitto service
+            dev, cleanup = ota_matrix.over_mqtt(ota_matrix.emulated(), existing.port, wifi=True, device="board-b", host="127.0.0.1")
+            try:
+                rows = ota_matrix.run_all(dev, ota_matrix.images_emulated())
+            finally:
+                cleanup()
+        self.assertEqual([r["id"] for r in rows if not r["ok"]], [])
+
+    def test_the_matrix_cli_has_the_broker_options(self):
+        text = (ROOT / "fleet" / "ota_matrix.py").read_text(encoding="utf-8")
+        for needle in ("--broker", "--anonymous", "rpartition(\":\")"):
+            self.assertIn(needle, text)
 
 
 class SecretsHygieneTests(unittest.TestCase):

@@ -45,9 +45,12 @@ class PushResult:
 
 
 class OtaClient:
-    def __init__(self, link, timeout_s: float = 2.0, end_timeout_s: float = 10.0):
+    def __init__(self, link, timeout_s: float = 2.0, end_timeout_s: float = 10.0, chunk_retries: int = 0):
         self.link, self.timeout_s, self.end_timeout_s, self.parser = link, timeout_s, end_timeout_s, Parser()
         self.hello: str | None = None
+        self.chunk_retries = chunk_retries   # over Wi-Fi a reply can be late (measured: up to 2.5 s); a repeated chunk is harmless by design
+        self.progress = False                # print a line every 500 chunks (a real run takes many minutes)
+        self.retried = 0                     # how many times a chunk had to be sent again (reported with the evidence)
 
     def _send(self, op: int, payload: bytes = b"") -> None:
         self.link.write(frame_msg("U", bytes([op]) + payload), 0)
@@ -94,8 +97,17 @@ class OtaClient:
             if written in dropped:   # the chunk is lost on the way: nothing is sent, the next chunk arrives out of order
                 dropped.discard(written)
                 msg = struct.pack("<I", written + len(data)) + bytes(img.data[written + len(data):written + 2 * len(data)])
-            status, extra = self._call(CHUNK, msg)
+            for attempt in range(self.chunk_retries + 1):
+                try:
+                    status, extra = self._call(CHUNK, msg)
+                    break
+                except OtaError:
+                    if attempt == self.chunk_retries:
+                        raise
+                    self.retried += 1
             chunks += 1
+            if self.progress and chunks % 500 == 0:
+                print(f"    ... {written}/{img.size} bytes, {chunks} chunks, {time.time() - t0:.0f} s, {self.retried} resends, {resumes} resumes", flush=True)
             if status == "BAD_OFFSET":
                 resumes += 1
                 written = struct.unpack("<I", extra[:4])[0]   # resume where the board is

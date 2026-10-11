@@ -167,23 +167,48 @@ class EmuBoard:
             port, rest = struct.unpack("<H", p[1:3])[0], p[3:]
             parts = rest.split(b"\0")
             caps = (33, 64, 65, 33, 65, 17)
-            if len(parts) < 7 or parts[6] != b"":   # six strings, each NUL-terminated, nothing after the last NUL
+            if len(parts) < 7 or len(parts[6]) > 1:   # six NUL-terminated strings, then at most one flags byte
                 return rep(1, 2)
+            flags = parts[6][0] if parts[6] else 0
             if any(len(x) + 1 > c for x, c in zip(parts[:6], caps, strict=True)):
                 return rep(1, 2)
             ssid, wpass, host, user, mpass, dev = (x.decode() for x in parts[:6])
             if not ssid or not host or not dev or not port:
                 return rep(1, 1)
-            self.net = {"ssid": ssid, "wpass": wpass, "host": host, "user": user, "mpass": mpass, "dev": dev, "port": port}
+            self.net = {"ssid": ssid, "wpass": wpass, "host": host, "user": user, "mpass": mpass, "dev": dev, "port": port,
+                        "tls": bool(flags & 1), "ca": self.net.get("ca", b"")}
             return rep(1, 0)
         if p[0] == 2:
             self.net = {}
+            self._ca_want = 0
             return rep(2, 0)
+        if p[0] == 4:   # CA_BEGIN
+            total = struct.unpack("<H", p[1:3])[0] if len(p) >= 3 else 0
+            if not 100 <= total <= 2000:
+                return rep(4, 2)
+            self._ca_want, self._ca_buf = total, bytearray()
+            return rep(4, 0)
+        if p[0] == 5:   # CA_CHUNK
+            want = getattr(self, "_ca_want", 0)
+            if len(p) < 4 or not want:
+                return rep(5, 1)
+            off = struct.unpack("<H", p[1:3])[0]
+            if off != len(self._ca_buf) or off + len(p) - 3 > want:
+                return rep(5, 4)
+            self._ca_buf += p[3:]
+            return rep(5, 0)
+        if p[0] == 6:   # CA_END
+            want, buf = getattr(self, "_ca_want", 0), bytes(getattr(self, "_ca_buf", b""))
+            self._ca_want = 0
+            if not want or len(buf) != want or not buf.startswith(b"-----BEGIN CERTIFICATE-----") or b"-----END CERTIFICATE-----" not in buf:
+                return rep(6, 4)
+            self.net["ca"] = buf
+            return rep(6, 0)
         if p[0] == 3:
             n = self.net
-            flags = 1 if n else 0
+            flags = (1 if n.get("ssid") else 0) | (8 if n.get("tls") else 0) | (16 if n.get("ca") else 0)
             body = b"\0".join(x.encode() for x in (n.get("ssid", ""), "", n.get("host", ""), n.get("dev", "")))
-            return rep(3, 0, bytes([flags, 0]) + body)
+            return rep(3, 0, bytes([flags, 0]) + struct.pack("<IIH", 150_000, 120_000, len(n.get("ca", b""))) + body)
         return rep(p[0], 1)
 
     def _reply(self, op: int, status: int, extra: bytes = b"") -> None:

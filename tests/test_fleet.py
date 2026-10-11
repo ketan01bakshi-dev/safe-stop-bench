@@ -4,6 +4,7 @@ from __future__ import annotations
 import dataclasses
 import re
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -74,6 +75,27 @@ class EmulatedBoardTests(unittest.TestCase):
         r = c.push(synthetic_image("2.12"), Faults(drop_chunks=[200, 4000], resend_every=3))
         self.assertEqual(r.outcome, "staged")
         self.assertEqual(r.resumes, 2)
+
+    def test_a_chunk_that_gets_no_answer_is_sent_again_when_retries_are_allowed(self):
+        class Lossy:   # swallows the first transmission of three chunks, as a late or lost Wi-Fi reply does
+            def __init__(self, inner):
+                self.inner, self.calls, self.drop = inner, 0, {5, 40, 41}
+
+            def write(self, data, now_ms=0):
+                self.calls += 1
+                if self.calls not in self.drop:
+                    self.inner.write(data, now_ms)
+
+            def read(self):
+                return self.inner.read()
+
+        b = EmuBoard("lossy", "2.10")
+        c = OtaClient(Lossy(b), timeout_s=0.05, chunk_retries=2)
+        r = c.push(synthetic_image("2.12"))
+        self.assertEqual((r.outcome, c.retried), ("staged", 3))
+        strict = OtaClient(Lossy(EmuBoard("lossy2", "2.10")), timeout_s=0.05)
+        with self.assertRaises(ota_client.OtaError):
+            strict.push(synthetic_image("2.12"))
 
     def test_corrupt_byte_and_wrong_signature_leave_no_trace(self):
         b, c = board()
@@ -239,6 +261,40 @@ class MqttTransportTests(unittest.TestCase):
         self.assertEqual(self.emu.version, "2.10")
 
 
+class SettleTests(unittest.TestCase):
+    """Over Wi-Fi the hello comes tens of seconds after a boot: _settle waits for it, then for a quiet spell, and returns the LAST one."""
+
+    class Link:
+        def __init__(self, hellos):   # (seconds after start, text)
+            self.t0, self.pending = time.time(), sorted(hellos)
+
+        def read(self):
+            out = b""
+            while self.pending and time.time() - self.t0 >= self.pending[0][0]:
+                out += ota_client.frame_msg("H", self.pending.pop(0)[1].encode())
+            return out
+
+    def run_settle(self, hellos, seconds, quiet_s):
+        dev = ota_matrix.Dev("x", self.Link(hellos), time.sleep, lambda: None, "real+wifi")
+        c = OtaClient(dev.link)
+        t = time.time()
+        return ota_matrix._settle(dev, c, seconds, quiet_s=quiet_s), time.time() - t
+
+    def test_waits_past_the_fixed_window_for_the_late_hello_and_stops_when_quiet(self):
+        text, took = self.run_settle([(0.6, "SafetyNode 2.31 (B) restored")], seconds=5.0, quiet_s=0.4)
+        self.assertIn("2.31", text)
+        self.assertLess(took, 2.0, "stops once the board has been quiet, not at the end of the window")
+
+    def test_returns_the_last_of_two_boots(self):
+        text, _ = self.run_settle([(0.2, "SafetyNode 2.36 (B) restored"), (0.5, "SafetyNode 2.35 (B) restored")], seconds=5.0, quiet_s=0.6)
+        self.assertIn("2.35", text)
+
+    def test_no_hello_waits_out_the_window(self):
+        text, took = self.run_settle([], seconds=0.5, quiet_s=0.2)
+        self.assertEqual(text, "")
+        self.assertGreaterEqual(took, 0.5)
+
+
 class PowerCutWindowTests(unittest.TestCase):
     """REL-11 / REL-12: power lost at each of the five persistent writes that end an update."""
 
@@ -349,6 +405,15 @@ class ReleaseTests(unittest.TestCase):
         wifi = release.limits(evidence(ota_wifi_real=[{"id": "REL-01", "title": "t", "ok": True}]))[0]
         self.assertIn("no TLS", wifi[0])
         self.assertIn("TLS", wifi[2])
+
+    def test_tls_evidence_changes_the_limit_to_the_remaining_weak_points(self):
+        row = [{"id": "REL-01", "title": "t", "ok": True}]
+        lim = release.limits(evidence(ota_wifi_real=row, ota_wifi_tls_real=row))[0]
+        self.assertIn("TLS", lim[0])
+        self.assertIn("1970", lim[0], "the clock caveat is part of the stated limit")
+        self.assertEqual(lim[1], "Low")
+        d = release.decide(evidence(ota_wifi_tls_real=[{"id": "REL-05", "title": "resume", "ok": False}]))
+        self.assertEqual(d.verdict, "NO GO")
 
     def test_the_transport_limit_follows_the_evidence(self):
         usb = release.limits(evidence())[0][0]

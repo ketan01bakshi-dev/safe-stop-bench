@@ -12,6 +12,7 @@ verdict**. Everything here reads the bench's own report files; nothing here can 
 | `rollout.py` / `rollouts.py` | Staged rollout over a mixed fleet (canary → a quarter → the rest) with one halt rule; the two runs of the release: a good build and a build that fails its health check |
 | `mqtt_link.py` | The same update through a local MQTT broker: `LocalBroker` (amqtt), `MqttLink` (what the client sees as a serial link) and `Gateway` (puts an emulated or the real board behind the broker) |
 | `provision.py` / `broker.py` | v2.28: the PC side of the board's Wi-Fi set-up (`'N'` messages over USB) and the login-protected LAN broker. Scripts: `scripts/provision_wifi.py`, `python -m fleet.broker login \| serve \| addresses` |
+| `certs.py` / `mosquitto_conf.py` | v2.30: the private CA + broker certificate for TLS, and the Mosquitto configuration block for the boards (applied by `scripts/setup_mosquitto_tls.ps1`, as Administrator) |
 | `telemetry.py` | Safety events as JSON (boot, staged / commit / rollback, resets, SAF_Status changes read off the bus) to `ssb/fleet/<device>/<event>`; best effort, never blocks a test |
 | `release.py` | One verdict — **BLOCKED / NO GO / GO WITH RISKS / GO** — from preflight + attack matrices + OTA matrices + both rollouts + the design campaigns, with the rules stated and every input file hashed |
 

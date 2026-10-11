@@ -10,6 +10,8 @@ Environment variables it reads (anything missing is asked for; passwords are ask
     SSB_MQTT_HOST   this PC's LAN address (python -m fleet.broker addresses)      SSB_MQTT_PORT  default 1884
     SSB_MQTT_USER   SSB_MQTT_PASS   the login you made with `python -m fleet.broker login`
     SSB_DEVICE      the board's id in the topics, default board-b
+    SSB_TLS         1 (default when secrets/tls/ca.pem exists) or 0: encrypt the link and pin the CA certificate on the board
+    SSB_TLS_CA      path of the CA certificate (public ca.pem), default secrets/tls/ca.pem; never the .key
 
 The settings are stored in the board's flash (not in the firmware), so the signed images stay free of secrets. See docs/WIFI_SETUP.md.
 """
@@ -23,7 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fleet import broker, provision  # noqa: E402
+from fleet import broker, certs, provision  # noqa: E402
 
 
 def ask(env: str, prompt: str, secret: bool = False, default: str | None = None) -> str:
@@ -58,7 +60,7 @@ def main() -> int:
     if not a.dry_run and not a.port:
         ap.error("--port is required (board B's serial port)")
     link = None
-    if a.port and not a.dry_run:
+    if a.port and not a.dry_run and (a.info or a.clear):
         from ssb.hil import SerialLink
         link = SerialLink(a.port)
     try:
@@ -74,18 +76,30 @@ def main() -> int:
         wpass = ask("SSB_WIFI_PASS", "Wi-Fi password", secret=True)
         guess = (broker.lan_addresses() or [""])[0]
         host = ask("SSB_MQTT_HOST", "this PC's LAN address (the broker)", default=guess)
-        port = int(ask("SSB_MQTT_PORT", "broker port", default=str(broker.DEFAULT_PORT)))
+        ca_path = Path(os.environ.get("SSB_TLS_CA") or (certs.DEFAULT_DIR / "ca.pem"))
+        use_tls = ask("SSB_TLS", "encrypt with TLS and pin the CA certificate? (1 = yes, 0 = no)", default="1" if ca_path.exists() else "0") == "1"
+        if use_tls and not ca_path.exists():
+            raise SystemExit(f"TLS needs the CA certificate: {ca_path} not found (python -m fleet.certs make --host <this PC's address>)")
+        port = int(ask("SSB_MQTT_PORT", "broker port", default=str(8883 if use_tls else broker.DEFAULT_PORT)))
         user = ask("SSB_MQTT_USER", "broker user", default="ssb")
         mpass = ask("SSB_MQTT_PASS", "broker password", secret=True)
         device = ask("SSB_DEVICE", "board id", default="board-b")
-        body = provision.set_payload(ssid, wpass, host, port, user, mpass, device)   # refuses what the board would refuse
-        print(f"settings are valid ({len(body)} bytes): network '{ssid}', broker {host}:{port} as '{user}', board id '{device}'")
+        body = provision.set_payload(ssid, wpass, host, port, user, mpass, device, use_tls)   # refuses what the board would refuse
+        ca_pem = provision.check_ca(ca_path.read_bytes()) if use_tls else b""   # refuses a key file or a non-certificate before anything is sent
+        print(f"settings are valid ({len(body)} bytes): network '{ssid}', broker {host}:{port} as '{user}', board id '{device}', "
+              + (f"TLS with CA {certs.fingerprint(ca_pem)[:23]}..." if use_tls else "NO TLS (plain MQTT)"))
         if a.dry_run:
             print("dry run: nothing sent")
             return 0
+        # open the port only now: kept open through the prompts, the board did not answer the first message (found on the real board)
+        from ssb.hil import SerialLink
+        link = SerialLink(a.port)
         p = provision.Provisioner(link)
-        p.set(ssid, wpass, host, port, user, mpass, device)
-        print("stored in the board's flash. The radio comes up within a few seconds (it stays off while a scenario runs).")
+        if use_tls:
+            p.set_ca(ca_pem)   # first: with TLS on and no CA the radio stays off, so the order never leaves a window of plain MQTT
+        p.set(ssid, wpass, host, port, user, mpass, device, use_tls)
+        print("stored in the board's flash" + (f" (CA certificate {len(ca_pem)} bytes, pinned)" if use_tls else "")
+              + ". The radio comes up within a few seconds (it stays off while a scenario runs).")
         if a.no_wait:
             return 0
         print(f"waiting for the network and for the broker at {host}:{port} (python -m fleet.broker serve must be running) ...")

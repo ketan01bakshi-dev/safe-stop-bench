@@ -47,9 +47,11 @@ class LocalBroker:
     `bind` 127.0.0.1 keeps it on this PC; 0.0.0.0 lets a board on the LAN connect. With a `password_file` (user:hash lines, made by
     `python -m fleet.broker login`) a client must log in; without one the broker is anonymous, which is only for 127.0.0.1."""
 
-    def __init__(self, port: int | None = None, bind: str = "127.0.0.1", password_file: str | None = None):
+    def __init__(self, port: int | None = None, bind: str = "127.0.0.1", password_file: str | None = None,
+                 tls: tuple[str, str] | None = None):
+        """`tls` = (certificate file, key file): the listener then speaks TLS only (used by the tests; the boards' broker is Mosquitto)."""
         self.port = port or free_port()
-        self.bind, self.password_file = bind, password_file
+        self.bind, self.password_file, self.tls = bind, password_file, tls
         self.loop: asyncio.AbstractEventLoop | None = None
         self._broker: Any = None
 
@@ -57,7 +59,10 @@ class LocalBroker:
         from amqtt.broker import Broker
         auth: dict = ({"amqtt.plugins.authentication.FileAuthPlugin": {"password_file": str(self.password_file)}} if self.password_file
                       else {"amqtt.plugins.authentication.AnonymousAuthPlugin": {"allow_anonymous": True}})
-        config = {"listeners": {"default": {"type": "tcp", "bind": f"{self.bind}:{self.port}"}}, "plugins": auth}
+        listener: dict = {"type": "tcp", "bind": f"{self.bind}:{self.port}"}
+        if self.tls:
+            listener.update({"ssl": True, "certfile": str(self.tls[0]), "keyfile": str(self.tls[1])})
+        config = {"listeners": {"default": listener}, "plugins": auth}
         loop = self.loop = asyncio.new_event_loop()
         ready = threading.Event()
 
@@ -98,8 +103,13 @@ class BrokerRefused(RuntimeError):
     pass
 
 
-def _client(port: int, host: str, user: str | None = None, password: str | None = None) -> mqtt.Client:
+def _client(port: int, host: str, user: str | None = None, password: str | None = None, ca: str | None = None) -> mqtt.Client:
+    """`ca`: path of the CA certificate that must have signed the broker's certificate. Given, the connection is TLS and the broker's
+    address must be one the certificate names; not given, the connection is plain MQTT."""
     c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    if ca:
+        c.tls_set(ca_certs=str(ca))
+        c.tls_insecure_set(False)
     if user:
         c.username_pw_set(user, password)
     outcome: list = []
@@ -110,7 +120,10 @@ def _client(port: int, host: str, user: str | None = None, password: str | None 
         done.set()
 
     c.on_connect = on_connect
-    c.connect(host, port, keepalive=30)
+    try:
+        c.connect(host, port, keepalive=30)
+    except OSError as e:   # includes ssl.SSLError: the certificate did not check out, or a plain port was spoken to in TLS
+        raise BrokerRefused(f"could not connect to {host}:{port}{' with TLS' if ca else ''}: {e}") from e
     c.loop_start()
     if not done.wait(8.0):
         c.loop_stop()
@@ -146,7 +159,7 @@ class MqttLink:
     """The PC side. Looks like a serial link to OtaClient."""
 
     def __init__(self, device: str, port: int, host: str = "127.0.0.1", user: str | None = None, password: str | None = None,
-                 reset_hook: Callable[[], object] | None = None):
+                 reset_hook: Callable[[], object] | None = None, ca: str | None = None):
         self.device = device
         self.reset_hook = reset_hook   # when the board's update traffic is on the network, its reset still has to come over the cable
         self._buf = bytearray()
@@ -154,7 +167,8 @@ class MqttLink:
         self._ack: str | None = None
         self._ack_evt = threading.Event()
         self.published = 0
-        self.c = _client(port, host, user, password)
+        self.to_board_qos = 1   # the real board over Wi-Fi uses 0 (ota_matrix.over_mqtt): see CHANGES_V2.md, v2.31
+        self.c = _client(port, host, user, password, ca)
         self.c.on_message = self._on_message
         _wait_subscribed(self.c, [topic(device, "from_board"), topic(device, "ctl_ack")])
 
@@ -167,7 +181,7 @@ class MqttLink:
             self._ack_evt.set()
 
     def write(self, data: bytes, now_ms: int = 0) -> None:   # now_ms: the serial link's signature; MQTT has no use for it
-        self.c.publish(topic(self.device, "to_board"), bytes(data), qos=1)
+        self.c.publish(topic(self.device, "to_board"), bytes(data), qos=self.to_board_qos)
         self.published += 1
 
     def read(self) -> bytes:
@@ -200,14 +214,14 @@ class Gateway:
     """Puts one board behind the broker. `target` is an EmuBoard or a SerialLink (anything with write / read / reset_board)."""
 
     def __init__(self, device: str, target: Any, port: int, host: str = "127.0.0.1", poll_s: float = 0.005,
-                 user: str | None = None, password: str | None = None, hello_on_connect: bool = False):
+                 user: str | None = None, password: str | None = None, hello_on_connect: bool = False, ca: str | None = None):
         """`hello_on_connect`: say hello once subscribed, as the real board does (ssc_net.h). With it the gateway is a stand-in for a
         board that is on the network itself, and the matrix's --wifi path can be exercised without hardware."""
         self.device, self.target, self.poll_s = device, target, poll_s
         self.lock = threading.Lock()
         self._stop = threading.Event()
         self.forwarded = 0
-        self.c = _client(port, host, user, password)
+        self.c = _client(port, host, user, password, ca)
         self.c.on_message = self._on_message
         _wait_subscribed(self.c, [topic(device, "to_board"), topic(device, "ctl")])
         if hello_on_connect:
