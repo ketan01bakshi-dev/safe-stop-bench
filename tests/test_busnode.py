@@ -29,10 +29,23 @@ class ReceivePathTests(unittest.TestCase):
         self.assertIn("RXB0 only", SRC)
 
     def test_the_diagnostics_message_carries_the_latency_fields_the_pc_parses(self):
-        self.assertRegex(SRC, r"uint8_t d\[111\]")
+        self.assertRegex(SRC, r"uint8_t d\[151\]")
         hil = (Path(__file__).resolve().parent.parent / "ssb" / "hil.py").read_text(encoding="utf-8")
-        for n in ("len(p) >= 67", "len(p) >= 87", "len(p) >= 111", "rx_overflow_run"):
+        for n in ("len(p) >= 67", "len(p) >= 87", "len(p) >= 111", "len(p) >= 151", "rx_overflow_run"):
             self.assertIn(n, hil)
+
+    def test_an_overflow_flag_is_confirmed_by_a_second_read_before_it_is_counted_or_cleared(self):
+        """v2.32: EFLG is sticky, so a real overflow shows on a second read and a corrupted read (0xFF) does not. Only a confirmed one is counted."""
+        block = SRC[SRC.index("if (e & (MCP2515::EFLG_RX0OVR"):SRC.index("counting = true;")]
+        self.assertIn("bool real = (mcp.getErrorFlags()", block)
+        self.assertLess(block.index("bool real"), block.index("overflows++"), "the second read comes first")
+        self.assertRegex(block, r"if \(real\) \{\s*ovf_confirmed\+\+;\s*overflows\+\+;")
+        self.assertLess(block.index("overflows++"), block.index("mcp.clearRXnOVR()"))
+        self.assertIn("ovf_raw[", block, "an unconfirmed read is still recorded")
+
+    def test_an_all_ones_interrupt_flag_read_is_read_again_not_acted_on(self):
+        drain = SRC[SRC.index("static void drain_rxb0()"):SRC.index("// A UDS request addressed to A")]
+        self.assertRegex(drain, r"if \(intf == 0xFF\) \{[^}]*intf_ff\+\+;\s*continue;")
 
     def test_every_overflow_is_filed_under_a_cause_or_under_none(self):
         self.assertTrue(re.search(r"if \(!any\) ovf_by\[4\]\+\+;", SRC))

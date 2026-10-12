@@ -3,8 +3,8 @@
     SET    port:u16 LE + six NUL-terminated strings (ssid, wifi password, broker host, broker user, broker password, device id) + a flags
            byte (bit0 = TLS)
     CLEAR  forget everything
-    INFO   flags (provisioned / wifi up / mqtt up / TLS on / CA stored), rssi, free and lowest-free heap, CA length, then ssid, ip, host, device
-           id. The board never sends a password back.
+    INFO   flags (provisioned / wifi up / mqtt up / TLS on / CA stored / MQTT refused), rssi, free and lowest-free heap, CA length, then ssid, ip,
+           host, device id. The board never sends a password back.
     CA_BEGIN / CA_CHUNK / CA_END   upload the CA certificate (public) that the board will pin for TLS
 
 The command line is scripts/provision_wifi.py; it reads the secrets from environment variables or a hidden prompt. Nothing here writes
@@ -45,6 +45,7 @@ class NetInfo:
     ca_len: int = 0
     heap_free: int = 0
     heap_min: int = 0
+    mqtt_refused: bool = False   # v2.34: the firmware was built without the link flag that pins the esp-mqtt task to core 0, so it will not run the client
 
 
 def set_payload(ssid: str, wifi_password: str, host: str, port: int, user: str, mqtt_password: str, device: str, tls: bool = False) -> bytes:
@@ -131,7 +132,8 @@ class Provisioner:
         heap_free, heap_min, ca_len = struct.unpack_from("<IIH", extra, 2)
         parts = [x.decode("utf-8", errors="replace") for x in extra[12:].split(b"\0")] + ["", "", "", ""]
         return NetInfo(bool(flags & 1), bool(flags & 2), bool(flags & 4), rssi, parts[0], parts[1], parts[2], parts[3],
-                       tls=bool(flags & 8), ca_stored=bool(flags & 16), ca_len=ca_len, heap_free=heap_free, heap_min=heap_min)
+                       tls=bool(flags & 8), ca_stored=bool(flags & 16), ca_len=ca_len, heap_free=heap_free, heap_min=heap_min,
+                       mqtt_refused=bool(flags & 32))
 
     def wait_online(self, timeout_s: float = 45.0, on_progress=None) -> NetInfo:
         """Poll INFO until Wi-Fi and the broker are both up, or the time is out. Returns the last INFO either way."""
@@ -151,4 +153,6 @@ def describe(i: NetInfo) -> str:
         return "nothing provisioned: the radio stays off"
     state = "Wi-Fi up" + (f" ({i.ip}, {i.rssi} dBm)" if i.wifi_up else " NOT yet") + ", broker " + ("connected" if i.mqtt_up else "NOT connected yet")
     link = ("TLS, CA pinned" if i.ca_stored else "TLS ON BUT NO CA STORED: the radio stays off") if i.tls else "plain MQTT (no TLS)"
+    if i.mqtt_refused:
+        link += "; MQTT REFUSED: this firmware was built without ssb.firmware_build.LINK_FLAGS (the esp-mqtt task is not pinned to core 0), rebuild with scripts/hil_flash.py"
     return f"network '{i.ssid}', broker {i.host}, device id '{i.device}', {link}: {state}; free heap {i.heap_free // 1024} KiB (lowest {i.heap_min // 1024})"

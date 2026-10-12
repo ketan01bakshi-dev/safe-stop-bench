@@ -315,6 +315,11 @@ class LinkDUT(BlackBoxObserver, DeviceUnderTest):
                 if len(p) >= 111:   # BusNode 2.12: interrupt -> receive buffer free (us): < 50 / < 100 / < 150 / < 200 / >= 200, and the maximum
                     self.diag_a["clr_hist"] = list(struct.unpack_from("<5I", p, 87))
                     self.diag_a["clr_max_us"] = struct.unpack_from("<I", p, 107)[0]
+                if len(p) >= 151:   # BusNode 2.13: real overflow or corrupted read? (see BusNode.ino, v2.32)
+                    v2 = struct.unpack_from("<8I", p, 111)
+                    self.diag_a["ovf_confirmed"], self.diag_a["ovf_cls"] = v2[0], list(v2[1:5])
+                    self.diag_a["intf_ff"], self.diag_a["intf_wake"], self.diag_a["bad_dlc"] = v2[5], v2[6], v2[7]
+                    self.diag_a["ovf_raw"] = list(p[143:151])
         # SAF_Status in arrival order: used once B's USB copy vouches for it; one with no copy within 20 ms of its arrival
         # is a replay. Usually the copy is already here (0-2 ms ahead); if B's port is read late, the frame waits.
         while self.pend:

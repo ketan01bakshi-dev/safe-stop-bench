@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ssb.config import ROOT
+from ssb.firmware_build import build_properties
 
 DEMO_KEY = b"demo-only-ssb-ota-key"
 IMAGES = ROOT / "fleet" / "images"
@@ -63,7 +64,7 @@ def build(minor: int, unhealthy: bool = False, cut_at: int | None = None) -> Pat
     out = ROOT / "hil" / "build" / f"fleet_{tag}"
     flags = f"-DFW_MINOR={minor}" + (" -DOTA_UNHEALTHY=1" if unhealthy else "") + (f" -DOTA_CUT_AT={cut_at}" if cut_at else "")
     p = subprocess.run([cli, "compile", "--fqbn", "esp32:esp32:esp32s3", "--library", str(ROOT / "hil" / "SafeStopCore"), "--build-path", str(out),
-                        "--build-property", f"compiler.cpp.extra_flags={flags}", str(SKETCH)], capture_output=True, text=True, encoding="utf-8", errors="replace")
+                        *build_properties(flags), str(SKETCH)], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if p.returncode != 0:
         raise RuntimeError(f"compile of SafetyNode {tag} failed:\n{(p.stdout + p.stderr)[-1500:]}")
     IMAGES.mkdir(parents=True, exist_ok=True)

@@ -8,7 +8,7 @@
 //     0x01 SET    port:u16 LE, then six NUL-terminated strings: ssid, wifi password, broker host, broker user, broker password, device id,
 //                 then one flags byte (bit0 = use TLS)
 //     0x02 CLEAR  forget everything (and switch the radio off)
-//     0x03 INFO   answers flags (b0 provisioned, b1 wifi up, b2 mqtt up, b3 TLS on, b4 CA stored), rssi, free heap and lowest free heap
+//     0x03 INFO   answers flags (b0 provisioned, b1 wifi up, b2 mqtt up, b3 TLS on, b4 CA stored, b5 MQTT refused: see mqtt_pin_state), rssi, free heap and lowest free heap
 //                 (u32 each), CA length (u16), then ssid, ip, host, device id. NEVER a password.
 //     0x04 CA_BEGIN  total:u16        0x05 CA_CHUNK  offset:u16 + up to 200 bytes        0x06 CA_END   (check + store the CA certificate)
 //   TLS (v2.30): the CA certificate (public) is uploaded with CA_*, kept in flash, and PINNED: the broker must present a certificate
@@ -19,18 +19,34 @@
 //   The hello is published on every (re)connect, after the subscription, so a PC that waits for it never talks to a deaf board.
 //
 // The radio is a guest on a safety controller: it is OFF while a scenario runs (poll(allowed=false)) and comes back 2 s after the run
-// ends, it runs in its own tasks (Wi-Fi and esp-mqtt), and the 10 ms control loop only ever pops a queue. The signature check protects
-// the IMAGE; TLS (when provisioned) protects the LINK and the login. See docs/WIFI_SETUP.md.
+// ends. It runs entirely off core 1, where the 10 ms control loop runs: the Wi-Fi tasks and the esp-mqtt task (pinned to core 0 by
+// hil/SafeStopCore/src/ssc_esp_pin.cpp) and, since v2.34, a "radio" task pinned to core 0 that makes every slow call: WiFi.begin ~50 ms,
+// stop_radio 80-130 ms, the MQTT client start. The control loop only decides whether the radio is wanted (poll() sets a flag), pops a queue and
+// publishes replies. Measured on the board (CHANGES_V2.md, v2.33 and v2.34): an esp-mqtt task running on core 1 stalled the loop 130-190 ms per
+// TLS handshake, and starting and stopping the radio from loop() stalled it 50-130 ms.
+// The cost: "off while a scenario runs" takes effect ~100 ms after the run starts, not before it. The signature check protects the IMAGE;
+// TLS (when provisioned) protects the LINK and the login. See docs/WIFI_SETUP.md.
 #pragma once
 #include <Arduino.h>
 #include <Preferences.h>
 #include <WiFi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 #include <mqtt_client.h>
 #include <ssc_core.h>
+#include "ssc_diag.h"
 
 namespace net {
+
+// Priority of the esp-mqtt task. The Arduino loop (the 10 ms control loop) runs at priority 1 on core 1. At the esp-mqtt default of 5 the task, when
+// it ran on core 1, preempted the loop for the ~190 ms of every TLS handshake (v2.33, measured with -DB_DIAG=1). A lower priority is NOT enough on
+// its own: mutex priority inheritance lifts the task to 23 for the whole handshake whatever is configured here (v2.34); that is what the core-0 pin
+// (ssc_esp_pin.cpp) is for. This keeps it from outranking the loop in the cases the pin does not cover.
+#ifndef NET_MQTT_PRIO
+#define NET_MQTT_PRIO 1
+#endif
 
 enum Op : uint8_t { SET = 1, CLEAR = 2, INFO = 3, CA_BEGIN = 4, CA_CHUNK = 5, CA_END = 6 };
 enum Status : uint8_t { OK = 0, BAD_MESSAGE = 1, TOO_LONG = 2, NO_STORE = 3, BAD_CA = 4 };
@@ -53,8 +69,19 @@ static QueueHandle_t rxq = nullptr;
 static esp_mqtt_client_handle_t cli = nullptr;
 static char t_to[48], t_from[48], client_id[40];
 static volatile bool mqtt_up = false, need_hello = false;
-static bool radio_on = false;
+static volatile bool mqtt_refused = false; // v2.34: the build lacks the link flag that pins the esp-mqtt task to core 0: the radio is never switched on (see mqtt_pin_state)
+static uint32_t cli_started_ms = 0;
+static volatile bool radio_on = false;     // written by the radio task, or by handle() while it holds radio_mx
+static volatile bool want_radio = false;   // written by loop() (poll, handle): should the radio be on? The radio task makes it so
 static uint32_t allowed_since = 0;
+static SemaphoreHandle_t radio_mx = nullptr;   // guards cli, radio_on and the credentials/CA the radio task reads while it starts things
+static TaskHandle_t radio_task = nullptr;
+static const char *hello_text = "";            // the text of the USB hello; constant after setup()
+
+struct Lock {   // radio_mx for one scope
+  Lock() { xSemaphoreTake(radio_mx, portMAX_DELAY); }
+  ~Lock() { xSemaphoreGive(radio_mx); }
+};
 
 static void load() {
   provisioned = false;
@@ -81,6 +108,7 @@ static void load() {
 
 static void begin() {
   rxq = xQueueCreate(6, sizeof(Msg));
+  radio_mx = xSemaphoreCreateMutex();
   load();
 }
 
@@ -93,17 +121,23 @@ static void rep(uint8_t op, uint8_t status, const uint8_t *extra = nullptr, uint
   Serial.write(buf, k);
 }
 
+// Caller holds radio_mx.
 static void stop_radio() {
+  BD_EVENT(bdiag::E_RADIO_OFF, 0);
   if (cli) {
+    // esp-mqtt (esp32:esp32 3.3.10) crashes if a client is stopped and destroyed before its task has first run: the task then takes the API lock of a client that
+    // no longer exists (found by the build-without-the-pin test, v2.34). Give a young client a moment.
+    uint32_t age = millis() - cli_started_ms;
+    if (age < 50) vTaskDelay(pdMS_TO_TICKS(50 - age));
     esp_mqtt_client_stop(cli);
     esp_mqtt_client_destroy(cli);
     cli = nullptr;
   }
   mqtt_up = false;
   if (radio_on) {
+    radio_on = false;   // first: a reader that checks it (INFO) must not touch a Wi-Fi driver that is going away
     WiFi.disconnect(true, false);
     WiFi.mode(WIFI_OFF);
-    radio_on = false;
   }
 }
 
@@ -111,10 +145,17 @@ static void on_event(void *, esp_event_base_t, int32_t id, void *data) {
   auto *e = (esp_mqtt_event_handle_t)data;
   if (id == MQTT_EVENT_CONNECTED) {
     mqtt_up = true;
+    BD_EVENT(bdiag::E_MQTT_UP, 0);
     esp_mqtt_client_subscribe_single(cli, t_to, 1);
     need_hello = true;
+    if (radio_task) xTaskNotifyGive(radio_task);   // the radio task publishes the hello
   } else if (id == MQTT_EVENT_DISCONNECTED) {
     mqtt_up = false;
+    BD_EVENT(bdiag::E_MQTT_DOWN, 0);
+#ifdef B_DIAG
+  } else if (id == MQTT_EVENT_ERROR) {
+    bdiag::event(bdiag::E_MQTT_ERR, e->error_handle ? (int16_t)e->error_handle->error_type : (int16_t)-1);
+#endif
   } else if (id == MQTT_EVENT_DATA) {
     bool whole = e->current_data_offset == 0 && e->data_len == e->total_data_len && e->data_len > 0 && e->data_len <= (int)sizeof(Msg::d);
     if (whole && e->topic_len == (int)strlen(t_to) && memcmp(e->topic, t_to, e->topic_len) == 0) {
@@ -145,29 +186,58 @@ static void start_mqtt() {
     cfg.credentials.username = user;
     cfg.credentials.authentication.password = mpass;
   }
+  cfg.task.priority = NET_MQTT_PRIO;
   cfg.session.keepalive = 20;
   cfg.network.reconnect_timeout_ms = 2000;
   cfg.buffer.size = 1024;
   cfg.buffer.out_size = 1024;
+  BD_EVENT(bdiag::E_MQTT_START, 0);
   cli = esp_mqtt_client_init(&cfg);
   if (!cli) return;
   esp_mqtt_client_register_event(cli, MQTT_EVENT_ANY, on_event, nullptr);
   esp_mqtt_client_start(cli);
+  cli_started_ms = millis();
 }
 
-// Call from loop(). `allowed` is false while a scenario runs. `hello` is the same text the USB hello carries.
-static void poll(bool allowed, const char *hello) {
-  if (!provisioned) return;
-  if (tls && ca_len == 0) return;   // TLS requested but no CA stored: stay off, never fall back to plain MQTT
-  uint32_t now = millis();
-  if (!allowed) {
-    allowed_since = 0;
-    if (radio_on) stop_radio();
+// v2.34: the control loop is safe from a TLS handshake only if the esp-mqtt task is on core 0. esp-mqtt creates it unpinned; hil/SafeStopCore/src/ssc_esp_pin.cpp pins
+// it when the build passes ssb/firmware_build.py's LINK_FLAGS. Unpinned it can run on core 1, boosted to priority 23 by mutex inheritance, and starve the loop for
+// 130-190 ms (CHANGES_V2.md, v2.34). So before the radio is ever switched on, ask the build: create a throw-away task under the name esp-mqtt gives its task,
+// unpinned, and see where the wrap placed it. 1 = pinned to core 0, 0 = not (this build has no link flag: the radio stays off and INFO flag bit 5 says why),
+// -1 = could not test (out of memory), try again.
+static int mqtt_pin_state() {
+  static int known = -1;
+  if (known >= 0) return known;
+  TaskHandle_t t = nullptr;
+  auto probe = [](void *) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    vTaskDelete(nullptr);
+  };
+  if (xTaskCreatePinnedToCore(probe, "mqtt_task", 2048, nullptr, 1, &t, tskNO_AFFINITY) != pdPASS || !t) return -1;
+  known = xTaskGetAffinity(t) == 0 ? 1 : 0;
+  xTaskNotifyGive(t);   // the probe deletes itself
+  return known;
+}
+
+// One pass of the radio task (core 0), with radio_mx held: make the radio match want_radio. This is where the slow calls are.
+static void radio_step() {
+  if (!want_radio || mqtt_refused) {   // mqtt_refused: no pin in this build, so no network (reboot to try again)
+    if (radio_on || cli) stop_radio();
     return;
   }
-  if (!allowed_since) allowed_since = now ? now : 1;
-  if (now - allowed_since < 2000) return;
+  int pin = mqtt_pin_state();
+  if (pin == 0) mqtt_refused = true;
+  if (pin != 1) return;
   if (!radio_on) {
+    BD_EVENT(bdiag::E_RADIO_ON, 0);
+#ifdef B_DIAG
+    static bool hooked = false;
+    if (!hooked) {
+      hooked = true;
+      WiFi.onEvent([](arduino_event_id_t id, arduino_event_info_t info) {
+        bdiag::event((uint8_t)id, id == ARDUINO_EVENT_WIFI_STA_DISCONNECTED ? (int16_t)info.wifi_sta_disconnected.reason : (int16_t)0);
+      });
+    }
+#endif
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);   // power-save adds tens of ms of latency to every message
     WiFi.setAutoReconnect(true);
@@ -177,10 +247,59 @@ static void poll(bool allowed, const char *hello) {
   if (!cli && WiFi.status() == WL_CONNECTED) start_mqtt();
   if (need_hello && mqtt_up && cli) {
     uint8_t buf[100];
-    size_t k = ssc::frame_msg('H', (const uint8_t *)hello, (uint8_t)min((size_t)90, strlen(hello)), buf);
+    size_t k = ssc::frame_msg('H', (const uint8_t *)hello_text, (uint8_t)min((size_t)90, strlen(hello_text)), buf);
     need_hello = false;
     esp_mqtt_client_enqueue(cli, t_from, (const char *)buf, (int)k, 1, 0, true);
   }
+}
+
+static void radio_main(void *) {
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));   // woken by poll() when the wish changes, by the MQTT task for the hello, else every 20 ms
+    {
+      Lock lk;
+      radio_step();
+    }
+#ifdef B_DIAG
+    static int16_t last_free = -1;   // the high-water mark only falls: one event per new minimum
+    int16_t f = (int16_t)min((UBaseType_t)32000, uxTaskGetStackHighWaterMark(nullptr));
+    if (f != last_free) {
+      last_free = f;
+      bdiag::event(bdiag::E_RADIO_STACK, f);
+    }
+#endif
+  }
+}
+
+// loop() side: change what the radio task is asked for. Never blocks.
+static void set_want(bool on) {
+  if (on && !radio_task) xTaskCreatePinnedToCore(radio_main, "radio", 8192, nullptr, 1, &radio_task, 0);   // made on first need: a board with nothing provisioned never has one
+  if (on == want_radio) return;
+  want_radio = on;
+  if (!on && rxq) xQueueReset(rxq);   // what came in before the radio went away is stale
+  if (radio_task) xTaskNotifyGive(radio_task);
+}
+
+// handle() only, with radio_mx held: switch the radio off NOW, in the caller's context, and keep it off until poll() has waited 2 s again.
+static void halt_locked() {
+  want_radio = false;
+  allowed_since = 0;
+  if (rxq) xQueueReset(rxq);
+  stop_radio();
+}
+
+// Call from loop(). `allowed` is false while a scenario runs. `hello` is the same text the USB hello carries. Cheap: it only sets a flag.
+static void poll(bool allowed, const char *hello) {
+  hello_text = hello;
+  bool usable = provisioned && !(tls && ca_len == 0);   // TLS requested but no CA stored: stay off, never fall back to plain MQTT
+  uint32_t now = millis();
+  if (!usable || !allowed) {
+    allowed_since = 0;
+    set_want(false);
+    return;
+  }
+  if (!allowed_since) allowed_since = now ? now : 1;
+  set_want(now - allowed_since >= 2000);
 }
 
 static bool pop(uint8_t *out, size_t *n) {
@@ -197,7 +316,10 @@ static void publish(const uint8_t *d, size_t n) {
   // the stop-and-wait client then pays that delay on every chunk (measured: 1.3 s per chunk, a full image takes ~2 hours)
   // QoS 0: with QoS 1 the broker answers every reply with a PUBACK, the board's TCP delays its acknowledgement (up to 250 ms), and the
   // broker holds the next chunk back until it arrives. Every message here already has an application-level answer and a resend.
+  // The radio task may be switching the radio (it holds radio_mx for up to ~130 ms then): the reply is dropped, the PC's stop-and-wait resends.
+  if (!want_radio || xSemaphoreTake(radio_mx, pdMS_TO_TICKS(5)) != pdTRUE) return;
   if (cli && mqtt_up) esp_mqtt_client_publish(cli, t_from, (const char *)d, (int)n, 0, 0);
+  xSemaphoreGive(radio_mx);
 }
 
 static bool take_str(const uint8_t *p, size_t n, size_t &i, char *dst, size_t cap) {
@@ -237,8 +359,8 @@ static void handle(const uint8_t *p, uint8_t n) {
       pr.putString("dev", d);
       pr.putUShort("port", pt);
       pr.end();
-      stop_radio();
-      allowed_since = 0;
+      Lock lk;
+      halt_locked();
       load();
       return rep(SET, OK);
     }
@@ -248,7 +370,8 @@ static void handle(const uint8_t *p, uint8_t n) {
         pr.clear();
         pr.end();
       }
-      stop_radio();
+      Lock lk;
+      halt_locked();
       memset(ssid, 0, sizeof ssid);
       memset(wpass, 0, sizeof wpass);
       memset(host, 0, sizeof host);
@@ -290,25 +413,60 @@ static void handle(const uint8_t *p, uint8_t n) {
       if (!pr.begin("net", false)) return rep(CA_END, NO_STORE);
       pr.putBytes("ca", ca_stage, ca_want);
       pr.end();
-      stop_radio();
-      allowed_since = 0;
+      Lock lk;
+      halt_locked();
       ca_want = ca_have = 0;
       load();
       return rep(CA_END, OK);
     }
     case INFO: {
       uint8_t x[190];
-      bool up = radio_on && WiFi.status() == WL_CONNECTED;
-      x[0] = (uint8_t)((provisioned ? 1 : 0) | (up ? 2 : 0) | (mqtt_up ? 4 : 0) | (tls ? 8 : 0) | (ca_len ? 16 : 0));
+      bool got = xSemaphoreTake(radio_mx, pdMS_TO_TICKS(50)) == pdTRUE;   // not while the radio task is switching the radio: report it as down
+      bool up = got && radio_on && WiFi.status() == WL_CONNECTED;
+      x[0] = (uint8_t)((provisioned ? 1 : 0) | (up ? 2 : 0) | (mqtt_up ? 4 : 0) | (tls ? 8 : 0) | (ca_len ? 16 : 0) | (mqtt_refused ? 32 : 0));
       x[1] = (uint8_t)(int8_t)(up ? WiFi.RSSI() : 0);
       uint32_t fh = ESP.getFreeHeap(), mh = ESP.getMinFreeHeap();
       memcpy(x + 2, &fh, 4);
       memcpy(x + 6, &mh, 4);
       memcpy(x + 10, &ca_len, 2);
       String ip = up ? WiFi.localIP().toString() : String("");
+      if (got) xSemaphoreGive(radio_mx);
       int k = snprintf((char *)x + 12, sizeof x - 12, "%s%c%s%c%s%c%s", ssid, 0, ip.c_str(), 0, host, 0, dev);
       return rep(INFO, OK, x, (uint8_t)min(188, k + 12));
     }
+#ifdef B_DIAG
+    case 7: {   // test hooks, USB only like every 'N' message: 1 MQTT reconnect, 2 Wi-Fi reconnect, 3 radio off then on, 4 NVS write, 5 100 NVS opens
+      uint8_t what = n > 1 ? p[1] : 0;
+      bdiag::event(bdiag::E_TEST, what);
+      if (what == 1) {
+        Lock lk;
+        if (cli) esp_mqtt_client_reconnect(cli);
+      } else if (what == 2) {
+        WiFi.disconnect(false, false);
+        WiFi.reconnect();
+      } else if (what == 3) {
+        Lock lk;
+        halt_locked();   // back after the 2 s guard, as after the end of a scenario
+      } else if (what == 4) {
+        static uint8_t k = 0;
+        uint8_t b[64];
+        memset(b, ++k, sizeof b);
+        bdiag::event(bdiag::E_NVS_BEGIN, 0);
+        Preferences pr;
+        if (pr.begin("diag", false)) {
+          pr.putBytes("x", b, sizeof b);
+          pr.end();
+        }
+        bdiag::event(bdiag::E_NVS_END, 0);
+      } else if (what == 5) {
+        for (int i = 0; i < 100; i++) {
+          Preferences pr;
+          if (pr.begin("ssb", true)) pr.end();
+        }
+      }
+      return rep(7, OK);
+    }
+#endif
     default: return rep(p[0], BAD_MESSAGE);
   }
 }

@@ -27,13 +27,18 @@
 #include <ssc_core.h>
 #include <ssc_uds.h>
 
-#define FW_VERSION "2.12"   // v2.29: receive-latency diagnostics (lat_* below); the CAN interrupt is now installed on the CAN task's core
+#define FW_VERSION "2.14"   // v2.32: `overflows` counts only overflows a second read confirms; an all-ones CANINTF read is read again, not acted on
 
 #ifndef CAN_SPI_HZ
 #define CAN_SPI_HZ 10000000   // the library default
 #endif
 #ifndef SSC_MODE_CHECK
 #define SSC_MODE_CHECK 1
+#endif
+// v2.32 test option, never set in a release build (-DEXTRA_DELAY_US=150 via scripts/hil_flash.py --cflags): hold off reading the receive buffer
+// by this many microseconds after every wake, to find the real deadline: below it nothing overflows, above it nearly every frame pair does.
+#ifndef EXTRA_DELAY_US
+#define EXTRA_DELAY_US 0
 #endif
 static const int QUEUE_LEN = 256;   // 1.28 s of B's traffic (200 frames/s)
 
@@ -60,6 +65,13 @@ static volatile uint32_t win_lat = 0, win_drain = 0, win_mismatch = 0, win_glitc
 // The number that decides it: time from the CAN interrupt until RXB0 is FREE again (RX0IF cleared). B's frames are back to back
 // (~222 us each at 500 kbit/s), so the next frame overflows the single buffer if this exceeds roughly 220 us.
 static volatile uint32_t wake_us = 0, win_clr = 0, clr_max = 0, clr_hist[5] = {0, 0, 0, 0, 0};   // < 50, < 100, < 150, < 200, >= 200 us
+// v2.32: an overflow flag that a corrupted SPI read can fake. EFLG is sticky (it stays set until we clear it), so a real overflow shows again
+// on a second read a moment later and a corrupted read does not. ovf_cls files the FIRST read: [0] 0xFF (the bus read back all ones)
+// [1] 0x40 exactly (RX0OVR alone: what a genuine overflow looks like with rollover off) [2] RX1OVR set (impossible for a real one: RXB1 is never
+// used) [3] RX0OVR with other flags. ovf_raw keeps the last eight first-read values. intf_ff / intf_wake: CANINTF read as 0xFF / with the sleep-wake
+// flag (impossible here). bad_dlc: a receive-buffer read whose length byte was above 8, so the frame was dropped without any overflow flag.
+static volatile uint32_t ovf_confirmed = 0, ovf_cls[4] = {0, 0, 0, 0}, intf_ff = 0, intf_wake = 0, bad_dlc = 0;
+static volatile uint8_t ovf_raw[8] = {0, 0, 0, 0, 0, 0, 0, 0}, ovf_raw_n = 0;
 static QueueHandle_t rxq, txq;
 static ssc::uds::Node uds_node = {ssc::uds::ID_A_REQ, ssc::uds::ID_A_RESP, FW_VERSION, 0};
 static TaskHandle_t can_task_h;
@@ -88,7 +100,10 @@ static bool read_rxb0_fast(struct can_frame *f) {
   digitalWrite(board::PIN_CAN_CS, HIGH);
   SPI.endTransaction();
   uint8_t dlc = rx[5] & 0x0F;
-  if (dlc > 8) return false;
+  if (dlc > 8) {
+    bad_dlc++;
+    return false;
+  }
   uint32_t id = ((uint32_t)rx[1] << 3) + (rx[2] >> 5);
   if (rx[2] & 0x08) {   // extended frame
     id = (id << 2) + (rx[2] & 0x03);
@@ -109,6 +124,11 @@ static void drain_rxb0() {
   struct can_frame f;
   for (int tries = 0; tries < 8; tries++) {
     uint8_t intf = board::mcp_read_reg(0x2C, CAN_SPI_HZ);
+    if (intf == 0xFF) {   // all ones: the chip did not answer (CANINTF can never hold every flag at once): read again, do not act on it
+      intf_ff++;
+      continue;
+    }
+    if (intf & 0x40) intf_wake++;
     if (intf & 0xA0) {
       // ERRIF / MERRF: INT is level-active, so while either is set INT stays low and no new RX edge can wake us.
       // ERRIF is set on ANY error-flag change, including back to "no errors", so clear it whenever it shows.
@@ -179,7 +199,8 @@ static void can_task(void *) {
     }
     uint32_t t0 = micros();
     if (notified) {
-      uint32_t lat = t0 - int_us;
+      int32_t dl = (int32_t)(t0 - int_us);   // v2.32: a second INT edge can be stamped after t0 (the task was already running): not a negative latency
+      uint32_t lat = dl < 0 ? 0 : (uint32_t)dl;
       last_lat = lat;
       if (lat > win_lat) win_lat = lat;
       if (lat > lat_max) lat_max = lat;
@@ -187,6 +208,7 @@ static void can_task(void *) {
     }
     wake_us = notified ? int_us : t0;
     uint32_t now = millis();
+    if (EXTRA_DELAY_US) delayMicroseconds(EXTRA_DELAY_US);
     if (can_ok) drain_rxb0();
     uint32_t dd = micros() - t0;
     last_drain = dd;
@@ -204,15 +226,24 @@ static void can_task(void *) {
       if (e & (MCP2515::EFLG_RX0OVR | MCP2515::EFLG_RX1OVR)) {
         // boot window (B already transmitting while A starts, before this task ran) is not counted: no scenario runs then
         if (counting) {
-          overflows++;
-          ovf_lat = win_lat;        // the worst wake / drain of the 2 ms window in which the overflow showed
-          ovf_drain = win_drain;
-          bool any = false;
-          if (win_lat >= 230) { ovf_by[0]++; any = true; }
-          if (win_clr >= 150) { ovf_by[1]++; any = true; }   // buffer was held >= 150 us after the interrupt
-          if (win_mismatch) { ovf_by[2]++; any = true; }
-          if (win_glitch) { ovf_by[3]++; any = true; }
-          if (!any) ovf_by[4]++;
+          // v2.32: EFLG is sticky, so a real overflow is still set a moment later and a corrupted read (found: 0xFF, 4 of 7 counted overflows
+          // in 2 million frames, none with a lost frame) is not. Only a confirmed one is an overflow; the rest are filed in ovf_cls.
+          delayMicroseconds(100);
+          bool real = (mcp.getErrorFlags() & (MCP2515::EFLG_RX0OVR | MCP2515::EFLG_RX1OVR)) != 0;
+          ovf_cls[e == 0xFF ? 0 : e == 0x40 ? 1 : (e & 0x80) ? 2 : 3]++;
+          ovf_raw[ovf_raw_n++ & 7] = e;
+          if (real) {
+            ovf_confirmed++;
+            overflows++;
+            ovf_lat = win_lat;        // the worst wake / drain of the 2 ms window in which the overflow showed
+            ovf_drain = win_drain;
+            bool any = false;
+            if (win_lat >= 230) { ovf_by[0]++; any = true; }
+            if (win_clr >= 150) { ovf_by[1]++; any = true; }   // buffer was held >= 150 us after the interrupt
+            if (win_mismatch) { ovf_by[2]++; any = true; }
+            if (win_glitch) { ovf_by[3]++; any = true; }
+            if (!any) ovf_by[4]++;
+          }
         }
         mcp.clearRXnOVR();
       }
@@ -310,7 +341,7 @@ void loop() {
     for (int i = 0; i < 5; i++) ob[i] = ovf_by[i];
     uint32_t ch[5], cm = clr_max;
     for (int i = 0; i < 5; i++) ch[i] = clr_hist[i];
-    uint8_t d[111] = {(uint8_t)rx, (uint8_t)(rx >> 8), (uint8_t)(rx >> 16), (uint8_t)(rx >> 24), last_eflg,
+    uint8_t d[151] = {(uint8_t)rx, (uint8_t)(rx >> 8), (uint8_t)(rx >> 16), (uint8_t)(rx >> 24), last_eflg,
                      (uint8_t)ov, (uint8_t)(ov >> 8), (uint8_t)(ov >> 16), (uint8_t)(ov >> 24),
                      bad_mode, (uint8_t)ri, (uint8_t)(ri >> 8), (uint8_t)gl, (uint8_t)(gl >> 8),
                      0, 0, (uint8_t)mm, (uint8_t)(mm >> 8), last_stat, 0, 0, 0, 0, 0, bukt,
@@ -321,6 +352,11 @@ void loop() {
     for (int i = 0; i < 5; i++) memcpy(d + 67 + 4 * i, &ob[i], 4);   // overflows by coinciding cause (see ovf_by)
     for (int i = 0; i < 5; i++) memcpy(d + 87 + 4 * i, &ch[i], 4);   // interrupt -> buffer free, five buckets, then the maximum
     memcpy(d + 107, &cm, 4);
+    // v2.32: from byte 111, little-endian u32 each: overflows confirmed by a second read, the first-read classes (4), CANINTF 0xFF reads, CANINTF
+    // sleep-wake flag, dropped frames with a bad length byte; then the last eight first-read EFLG values (one byte each, oldest overwritten)
+    uint32_t v2[8] = {ovf_confirmed, ovf_cls[0], ovf_cls[1], ovf_cls[2], ovf_cls[3], intf_ff, intf_wake, bad_dlc};
+    for (int i = 0; i < 8; i++) memcpy(d + 111 + 4 * i, &v2[i], 4);
+    for (int i = 0; i < 8; i++) d[143 + i] = ovf_raw[i];
     send('D', d, sizeof d);
   }
 }

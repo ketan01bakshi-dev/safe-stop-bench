@@ -2,6 +2,7 @@
 
     python scripts/hil_flash.py                         # compile both sketches, print flash/RAM use
     python scripts/hil_flash.py --b COM14 --a COM13     # compile and upload: B = safety controller, A = bus node
+    python scripts/hil_flash.py --a COM14 --cflags=-DEXTRA_DELAY_US=150   # a TEST build (v2.32): extra compiler flags, for experiments only
 
 Uses arduino-cli (ARDUINO_CLI or PATH), the esp32:esp32 core and the autowp-mcp2515 library.
 """
@@ -16,6 +17,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from ssb.firmware_build import build_properties  # noqa: E402
+
 FQBN = "esp32:esp32:esp32s3"
 SKETCHES = {"b": ROOT / "hil" / "firmware" / "SafetyNode", "a": ROOT / "hil" / "firmware" / "BusNode"}
 
@@ -27,11 +31,12 @@ def cli() -> str:
     sys.exit("arduino-cli not found: set ARDUINO_CLI")
 
 
-def compile_sketch(role: str) -> dict:
+def compile_sketch(role: str, cflags: str = "") -> dict:
     sk = SKETCHES[role]
     build = ROOT / "hil" / "build" / f"fw_{role}"
+    extra = build_properties(cflags)
     p = subprocess.run([cli(), "compile", "--fqbn", FQBN, "--library", str(ROOT / "hil" / "SafeStopCore"),
-                        "--build-path", str(build), "--warnings", "default", str(sk)], capture_output=True, text=True)
+                        "--build-path", str(build), "--warnings", "default", *extra, str(sk)], capture_output=True, text=True)
     if p.returncode != 0:
         print(p.stdout[-3000:], p.stderr[-3000:])
         sys.exit(f"compile failed: {sk.name}")
@@ -51,9 +56,10 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--b", help="COM port of board B (safety controller): upload SafetyNode")
     ap.add_argument("--a", help="COM port of board A (bus node): upload BusNode")
+    ap.add_argument("--cflags", default="", help="extra compiler flags for a TEST build, e.g. -DEXTRA_DELAY_US=150 (never for a release build)")
     a = ap.parse_args()
     for role in ("b", "a"):
-        r = compile_sketch(role)
+        r = compile_sketch(role, a.cflags)
         print(f"{r['sketch']:11} flash {r['flash']}, RAM {r['ram']}, {len(r['warnings'])} warning(s) in our code")
         for w in r["warnings"]:
             print("   ", w)

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ssb.config import ROOT
+from ssb.firmware_build import build_properties
 
 from .check import load_inventory
 from .uds import uds_report
@@ -102,7 +103,7 @@ def compile_sketch(role: str) -> dict:
         return {"ok": False, "output": "arduino-cli not found: set ARDUINO_CLI"}
     build = ROOT / "hil" / "build" / f"preflight_{role}"
     p = subprocess.run([cli, "compile", "--fqbn", FQBN, "--library", str(ROOT / "hil" / "SafeStopCore"), "--build-path", str(build),
-                        str(SKETCHES[role])], capture_output=True, text=True, encoding="utf-8", errors="replace")
+                        *build_properties(), str(SKETCHES[role])], capture_output=True, text=True, encoding="utf-8", errors="replace")
     out = (p.stdout or "") + (p.stderr or "")
     m = re.search(r"Sketch uses (\d+) bytes \((\d+)%\).*?Maximum is (\d+) bytes", out, re.S)
     part = build / "partitions.csv"

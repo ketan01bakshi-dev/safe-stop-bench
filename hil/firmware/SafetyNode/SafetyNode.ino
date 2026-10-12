@@ -16,6 +16,7 @@
 #include <ssc_uds.h>
 #include <Preferences.h>
 #include "ssc_ota.h"
+#include "ssc_diag.h"   // v2.33: loop-stall diagnostics, empty unless built with -DB_DIAG=1
 #include "ssc_net.h"
 
 // v2.26: the minor version is a build flag (-DFW_MINOR=10), so the bench can build several signed images from one source.
@@ -111,19 +112,27 @@ static void persist_config() {
 void loop() {
   uint8_t buf[256];
   int n;
-  while ((n = Serial.available()) > 0) {
-    n = Serial.read(buf, n < (int)sizeof buf ? n : (int)sizeof buf);
-    for (int i = 0; i < n; i++) {
-      if (!ota_parser.push(buf[i])) continue;
-      if (ota_parser.type == 'R') pc_session = true;   // the PC started a run: no update until the next reset
-      else if (ota_parser.type == 'U') ota::handle(ota_parser.payload, ota_parser.len, node.active() && pc_session, FW_VERSION);
-      else if (ota_parser.type == 'N') net::handle(ota_parser.payload, ota_parser.len);
+  BD_LOOP_START();
+  {
+    BD_SEC(bdiag::S_SERIAL);
+    while ((n = Serial.available()) > 0) {
+      n = Serial.read(buf, n < (int)sizeof buf ? n : (int)sizeof buf);
+      for (int i = 0; i < n; i++) {
+        if (!ota_parser.push(buf[i])) continue;
+        if (ota_parser.type == 'R') pc_session = true;   // the PC started a run: no update until the next reset
+        else if (ota_parser.type == 'U') ota::handle(ota_parser.payload, ota_parser.len, node.active() && pc_session, FW_VERSION);
+        else if (ota_parser.type == 'N') net::handle(ota_parser.payload, ota_parser.len);
+      }
+      node.feed(buf, (size_t)n, (int64_t)millis());
     }
-    node.feed(buf, (size_t)n, (int64_t)millis());
   }
   // v2.28: the radio is off while a scenario runs; messages that came in over MQTT are the same OTA messages, answered over MQTT.
-  net::poll(!(node.active() && pc_session), fw);
   {
+    BD_SEC(bdiag::S_NETPOLL);
+    net::poll(!(node.active() && pc_session), fw);
+  }
+  {
+    BD_SEC(bdiag::S_NETRX);
     uint8_t m[sizeof(net::Msg::d)];
     size_t ml;
     while (net::pop(m, &ml)) {
@@ -135,9 +144,16 @@ void loop() {
       }
     }
   }
-  persist_config();
-  ota::confirm_when_stable(millis(), health_ok(), FW_VERSION);
+  {
+    BD_SEC(bdiag::S_PERSIST);
+    persist_config();
+  }
+  {
+    BD_SEC(bdiag::S_CONFIRM);
+    ota::confirm_when_stable(millis(), health_ok(), FW_VERSION);
+  }
   if (wd_edges) {
+    BD_SEC(bdiag::S_WD);
     noInterrupts();
     uint32_t k = wd_edges;
     wd_edges = 0;
@@ -145,6 +161,7 @@ void loop() {
     node.gpio_kicks((int)k, (int64_t)millis());
   }
   if (can_ok && millis() - last_flags_ms >= 5) {
+    BD_SEC(bdiag::S_CAN);
     last_flags_ms = millis();
     uint8_t e = mcp.getErrorFlags();
     // v2.9.3: a CAN controller that has left normal mode (reset by a supply/SPI glitch) cannot send the actuator
@@ -167,5 +184,9 @@ void loop() {
       if (k) can_tx(nullptr, uds_node.resp_id, out, k);
     }
   }
-  node.poll((int64_t)millis());
+  {
+    BD_SEC(bdiag::S_NODE);
+    node.poll((int64_t)millis());
+  }
+  BD_REPORT();
 }

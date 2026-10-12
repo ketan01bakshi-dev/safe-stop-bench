@@ -108,6 +108,12 @@ and the standing limit changes from "no encryption" to the smaller list under "W
 
 - **Mosquitto 2.1 warnings.** Start-up logs two deprecation notices: `per_listener_settings` goes away in Mosquitto 3.0 (where password and ACL plugins
   take over), and your own `allow_anonymous true` line has a newer spelling. Both still work; nothing here changed your 1883 listener.
+- **The radio and the control loop (v2.34).** The Wi-Fi and MQTT work all runs off core 1, where the 10 ms control loop runs: the Wi-Fi tasks, the esp-mqtt task
+  (pinned to core 0 by `hil/SafeStopCore/src/ssc_esp_pin.cpp`) and a `radio` task on core 0 that makes the slow calls (starting and stopping the radio). Before this, a
+  reconnect (a Wi-Fi blip, a broker restart) could stop the loop for 130 to 190 ms during the TLS handshake, and the frames it then sent came out in a burst, out of
+  order, with some lost. Two consequences: (1) "the radio is off while a scenario runs" takes effect 0.05 to 0.4 s after the run starts, not before it; (2) the firmware
+  has to be built with the link flag in `ssb/firmware_build.py` (`scripts/hil_flash.py`, `fleet/image.py` and `health/preflight.py` all pass it). A build without it refuses
+  to run MQTT, and `scripts/provision_wifi.py --info` says "MQTT REFUSED". Details and measurements: `CHANGES_V2.md`, v2.34.
 - **Only board B has a radio.** B receives updates; A (the bus observer) has nothing to update and its CAN receive timing matters (a late wake loses a frame;
   see `CHANGES_V2.md`, v2.29), and the Wi-Fi stack shares its processor core. Putting A on the network would be separate work.
 - **The firmware is about 1 MB** (78 % of the 1.25 MB update slot), so a push is about 5150 chunks.
