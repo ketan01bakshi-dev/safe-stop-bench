@@ -1,6 +1,6 @@
 [project]
 name = "safe-stop-bench"
-version = "2.34"
+version = "2.39"
 description = "SiL bench for an autonomous vehicle's safety layer: E2E, watchdogs, envelope, actuator checks, latched minimal risk manoeuvres"
 requires-python = ">=3.10"
 dependencies = []
@@ -13,7 +13,9 @@ security = ["numpy"]                          # security/ids.py: the intrusion d
 fleet = ["paho-mqtt", "amqtt", "cryptography"]                # OTA over a local MQTT broker + telemetry (v2.27); the tests skip without it
 llm = ["anthropic"]                           # design/ drafter: Claude Sonnet 5.5 (v2.16)
 dev = ["ruff", "mypy"]
+p5 = ["matplotlib"]                            # vehicle/tools/make_timeline.py: the P5 contrast timeline (v2.36)
 mdf = ["asammdf"]                             # MDF4 traces, run.py --mdf (v2.7; on Python 3.14 see ssb/mdf_export.py)
+plant = ["fmpy"]                              # P6 plant pipeline: python -m plant.ci (needs OpenModelica omc on the machine; v2.39)
 
 [tool.ruff]
 line-length = 140

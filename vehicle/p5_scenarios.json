@@ -1,0 +1,19 @@
+{
+  "_note": "P5 scenarios (v2.36). A separate file, run with `run.py --scenario-file vehicle/p5_scenarios.json`, so scenarios/scenarios.json and the CI baseline are untouched. Cold start to 20 km/h, then the command stream is lost at 4.5 s. P5-01: lost for good. P5-01L: lost for 300 ms and then back (a new scenario, not SC-15, which is 200 ms); a controller that does not latch resumes driving, so it is the control for the no_latch bug. duration_ms is long enough for the long_timeout bug (which stops about 1.2 s later) to finish its stop.",
+  "scenarios": [
+    {
+      "id": "P5-01", "key": "p5_planned_stop_link_lost",
+      "title": "P5: cold start to 20 km/h, command stream lost at 4.5 s for good: controlled stop, latched",
+      "req": ["SR-01", "SR-05"], "start_kmh": 0, "target_kmh": 20, "inject_ms": 4500, "duration_ms": 14000,
+      "faults": [{"type": "link_lost", "start": 4500}],
+      "expect": {"reaction": "STOP_IN_LANE", "cause": ["TIMEOUT"], "stop": true, "latched": true}
+    },
+    {
+      "id": "P5-01L", "key": "p5_planned_stop_link_lost_300ms",
+      "title": "P5: cold start to 20 km/h, command stream lost for 300 ms at 4.5 s: must stop and stay stopped",
+      "req": ["SR-01", "SR-05"], "start_kmh": 0, "target_kmh": 20, "inject_ms": 4500, "duration_ms": 14000,
+      "faults": [{"type": "link_lost", "start": 4500, "end": 4800}],
+      "expect": {"reaction": "STOP_IN_LANE", "cause": ["TIMEOUT"], "stop": true, "latched": true}
+    }
+  ]
+}

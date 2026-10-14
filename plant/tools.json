@@ -1,0 +1,5 @@
+{
+ "_note": "Tool chain of the P6 plant pipeline on this laptop (installed 2026-10-14 with the owner's OK). CI uses its own Linux OpenModelica.",
+ "openmodelica": "1.26.9 (64-bit), official Windows installer OpenModelica-v1.26.9-64bit.exe, MD5 82b11beaf6bd0e9948445fd7fd7af566 (as published), SHA-256 ede0201609835cb42d2f6d92e4087e528016f26fef23eda5e652e364f8058bee, Authenticode signed by Open Source Modelica Consortium",
+ "omc": "D:/OpenModelica/bin/omc.exe"
+}

@@ -1,0 +1,103 @@
+{
+  "_note": "Plant-model maturity ladder (P6). Each level needs every check of the levels below. Tolerances are FIXED here and the certificate records this file's hash, so a tolerance cannot be loosened to pass (shortcut S1). Method after a simulation-evaluation review: falsifiable spec, hand calculation vs solver, two-point convergence with both values reported, shortcuts named, every failure attributed to MODEL, CHECK or TOOL. AI-assisted, synthetic, illustrative.",
+  "version": 1,
+  "attribution": {
+    "MODEL": "the model violates the spec: counts against the model's level",
+    "CHECK": "the check itself failed to evaluate (a bug in the check): fix the check, re-run; never counts against the model",
+    "TOOL": "omc / compiler / simulation environment failed: the run is BLOCKED, the level is not lowered"
+  },
+  "levels": [
+    {
+      "id": "L0",
+      "name": "Specified",
+      "requires": [
+        "spec.complete",
+        "model.check",
+        "model.units"
+      ]
+    },
+    {
+      "id": "L1",
+      "name": "Verified",
+      "requires": [
+        "handcalc.*",
+        "convergence.*",
+        "mutants.all_caught"
+      ]
+    },
+    {
+      "id": "L2",
+      "name": "Back-to-back",
+      "requires": [
+        "b2b.*",
+        "bench.regression"
+      ]
+    },
+    {
+      "id": "L3",
+      "name": "Validated",
+      "requires": [
+        "validation.measured"
+      ],
+      "_note": "needs measured data; the vehicle plant has none, so it tops out at L2"
+    },
+    {
+      "id": "L4",
+      "name": "Released",
+      "requires": [
+        "release.fmu",
+        "release.gate"
+      ]
+    }
+  ],
+  "tolerances": {
+    "simulation_tolerance_coarse": 1e-06,
+    "simulation_tolerance_fine": 1e-08,
+    "convergence_rel": 0.005,
+    "convergence_abs_floor": 0.0001,
+    "lag63_abs": 0.01,
+    "dead_time_s": 0.002,
+    "limit_abs": 1e-06,
+    "distance_rel": 0.01,
+    "time_s": 0.01,
+    "steady_rel": 0.005,
+    "standstill_abs": 1e-06,
+    "b2b_rel": 0.02,
+    "b2b_abs": 0.01,
+    "_b2b_note": "b2b_rel/b2b_abs fixed on 2026-10-14 BEFORE the first L2 run: per-ms max |python - fmu| <= max(b2b_rel * signal range, b2b_abs). It must absorb the 1 ms dead-time difference D1; it is not widened after seeing results."
+  },
+  "spec_required_sections": [
+    "## 2. Interface",
+    "## 3. Parameters",
+    "## 4. Required behaviour",
+    "## 5. Known differences",
+    "## 6. Out of scope"
+  ],
+  "shortcuts": [
+    {
+      "id": "S1",
+      "shortcut": "loosen a tolerance until a check passes",
+      "blocked_by": "tolerances fixed in this file; its hash is in the certificate"
+    },
+    {
+      "id": "S2",
+      "shortcut": "report only the fine-tolerance result as 'converged'",
+      "blocked_by": "the certificate lists BOTH convergence values and their difference per experiment"
+    },
+    {
+      "id": "S3",
+      "shortcut": "tune parameters until back-to-back matches",
+      "blocked_by": "the model file hash is frozen in the L1 certificate; L2 must run on the same hash"
+    },
+    {
+      "id": "S4",
+      "shortcut": "a pipeline that cannot fail",
+      "blocked_by": "every seeded model mutant must turn at least one L1 check red (mutants.all_caught)"
+    },
+    {
+      "id": "S5",
+      "shortcut": "count a tool crash as a model failure (or as a pass)",
+      "blocked_by": "TOOL attribution: the run is BLOCKED, neither pass nor fail"
+    }
+  ]
+}

@@ -1,0 +1,180 @@
+{
+ "about": "Conformance cases for the chassis side of the P5 link (docs/P5_LINK_CONTRACT.md). Hand-written: every expected value was reasoned from the contract, not recorded from the code. vehicle/conformance.py runs them against ChassisCore; the stage 2 firmware port must pass the same file. Time is in ms; at each event the core gets rx() first, then step(t); step(t) also runs at every ms in between. 'sent' lists the frame types emitted by that rx + step; 'echo' checks fields of the last ECHO among them. An 'encoders' event is a sample of the four cumulative slot counts (FL, FR, RL, RR) with the mask of fitted sensors, given to set_encoders(t) before step(t) (link version 2). Defaults: dead-man 200, writer 10, boot id 7, build p5-sim, hard cap 255, pwm cap in ARM 210, run 42, nonce 99.",
+ "params": {"boot_id": 7, "build": "p5-sim", "deadman_ms": 200, "writer_period_ms": 10, "echo_period_ms": 50, "hello_period_ms": 500, "hard_cap": 255},
+ "cases": [
+  {"name": "power-up: DISARMED, announces itself with HELLO",
+   "steps": [
+    {"t": 0, "expect": {"state": "DISARMED", "reason": "NONE", "outputs": [0, 0], "sent": ["HELLO"]}}]},
+
+  {"name": "ARM accepted; the pins follow a setpoint only at the next writer tick",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}, "expect": {"state": "ARMED", "outputs": [0, 0], "sent": ["ECHO"]}},
+    {"t": 115, "rx": {"type": "Setpoint", "src": "b", "run_id": 42, "nonce": 99, "seq": 1, "t_ms": 0, "pwm_l": 170, "pwm_r": 170}, "expect": {"state": "ARMED", "outputs": [0, 0]}},
+    {"t": 120, "expect": {"state": "ARMED", "outputs": [170, 170]}},
+    {"t": 125, "rx": {"type": "Setpoint", "src": "b", "run_id": 42, "nonce": 99, "seq": 2, "t_ms": 50, "pwm_l": 100, "pwm_r": 100}, "expect": {"outputs": [170, 170]}},
+    {"t": 130, "expect": {"state": "ARMED", "outputs": [100, 100]}}]},
+
+  {"name": "dead-man: more than 200 ms without a valid setpoint latches; the pins follow at the next writer tick",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}},
+    {"t": 110, "rx": {"type": "Setpoint", "src": "b", "run_id": 42, "nonce": 99, "seq": 1, "t_ms": 0, "pwm_l": 170, "pwm_r": 170}},
+    {"t": 310, "expect": {"state": "ARMED", "outputs": [170, 170]}},
+    {"t": 311, "expect": {"state": "LATCHED_STOP", "reason": "DEADMAN", "outputs": [170, 170], "sent": ["ECHO"]}},
+    {"t": 320, "expect": {"state": "LATCHED_STOP", "reason": "DEADMAN", "outputs": [0, 0]}}]},
+
+  {"name": "a gap of exactly 200 ms is tolerated",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}},
+    {"t": 110, "rx": {"type": "Setpoint", "src": "b", "run_id": 42, "nonce": 99, "seq": 1, "t_ms": 0, "pwm_l": 170, "pwm_r": 170}},
+    {"t": 310, "rx": {"type": "Setpoint", "src": "b", "run_id": 42, "nonce": 99, "seq": 2, "t_ms": 200, "pwm_l": 120, "pwm_r": 120}, "expect": {"state": "ARMED", "outputs": [120, 120]}},
+    {"t": 500, "expect": {"state": "ARMED"}},
+    {"t": 511, "expect": {"state": "LATCHED_STOP", "reason": "DEADMAN"}}]},
+
+  {"name": "the dead-man starts at the ARM: no setpoint at all latches at 301",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}},
+    {"t": 300, "expect": {"state": "ARMED"}},
+    {"t": 301, "expect": {"state": "LATCHED_STOP", "reason": "DEADMAN"}}]},
+
+  {"name": "a wrong nonce from the armed peer latches",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}},
+    {"t": 110, "rx": {"type": "Setpoint", "src": "b", "run_id": 42, "nonce": 99, "seq": 1, "t_ms": 0, "pwm_l": 170, "pwm_r": 170}},
+    {"t": 155, "rx": {"type": "Setpoint", "src": "b", "run_id": 42, "nonce": 98, "seq": 2, "t_ms": 45, "pwm_l": 170, "pwm_r": 170}, "expect": {"state": "LATCHED_STOP", "reason": "BAD_NONCE", "outputs": [170, 170], "sent": ["ECHO"]}},
+    {"t": 160, "expect": {"outputs": [0, 0]}}]},
+
+  {"name": "an old run id from the armed peer latches",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}},
+    {"t": 110, "rx": {"type": "Setpoint", "src": "b", "run_id": 41, "nonce": 99, "seq": 1, "t_ms": 0, "pwm_l": 170, "pwm_r": 170}, "expect": {"state": "LATCHED_STOP", "reason": "BAD_RUN", "sent": ["ECHO"]}}]},
+
+  {"name": "a setpoint above the ARM cap latches (and is never applied)",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}},
+    {"t": 110, "rx": {"type": "Setpoint", "src": "b", "run_id": 42, "nonce": 99, "seq": 1, "t_ms": 0, "pwm_l": 211, "pwm_r": 100}, "expect": {"state": "LATCHED_STOP", "reason": "CMD_RANGE", "outputs": [0, 0]}},
+    {"t": 130, "expect": {"outputs": [0, 0]}}]},
+
+  {"name": "a negative setpoint latches too (stage 1 drives forward only)",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}},
+    {"t": 110, "rx": {"type": "Setpoint", "src": "b", "run_id": 42, "nonce": 99, "seq": 1, "t_ms": 0, "pwm_l": -1, "pwm_r": 0}, "expect": {"state": "LATCHED_STOP", "reason": "CMD_RANGE"}}]},
+
+  {"name": "a duplicate or reordered setpoint is not a sign of life",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}},
+    {"t": 110, "rx": {"type": "Setpoint", "src": "b", "run_id": 42, "nonce": 99, "seq": 5, "t_ms": 0, "pwm_l": 170, "pwm_r": 170}},
+    {"t": 300, "rx": {"type": "Setpoint", "src": "b", "run_id": 42, "nonce": 99, "seq": 5, "t_ms": 0, "pwm_l": 170, "pwm_r": 170}, "expect": {"state": "ARMED", "counters": {"rx_stale": 1}}},
+    {"t": 311, "expect": {"state": "LATCHED_STOP", "reason": "DEADMAN"}}]},
+
+  {"name": "a frame from another address is ignored, counted, and gives no sign of life",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}},
+    {"t": 110, "rx": {"type": "Setpoint", "src": "x", "run_id": 42, "nonce": 98, "seq": 1, "t_ms": 0, "pwm_l": 170, "pwm_r": 170}, "expect": {"state": "ARMED", "outputs": [0, 0], "counters": {"rx_foreign": 1}}},
+    {"t": 300, "expect": {"state": "ARMED"}},
+    {"t": 301, "expect": {"state": "LATCHED_STOP", "reason": "DEADMAN"}}]},
+
+  {"name": "a corrupted frame is counted and has no effect",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}},
+    {"t": 110, "rx": {"type": "Setpoint", "src": "b", "run_id": 42, "nonce": 99, "seq": 1, "t_ms": 0, "pwm_l": 170, "pwm_r": 170, "corrupt": true}, "expect": {"state": "ARMED", "outputs": [0, 0], "counters": {"rx_bad": 1, "rx_ok": 1}}}]},
+
+  {"name": "a setpoint while DISARMED is ignored",
+   "steps": [
+    {"t": 100, "rx": {"type": "Setpoint", "src": "b", "run_id": 42, "nonce": 99, "seq": 1, "t_ms": 0, "pwm_l": 170, "pwm_r": 170}, "expect": {"state": "DISARMED", "outputs": [0, 0], "counters": {"rx_ignored": 1}}}]},
+
+  {"name": "valid setpoints after a latch are ignored: the pins stay at zero",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}},
+    {"t": 110, "rx": {"type": "Setpoint", "src": "b", "run_id": 42, "nonce": 99, "seq": 1, "t_ms": 0, "pwm_l": 170, "pwm_r": 170}},
+    {"t": 321, "expect": {"state": "LATCHED_STOP", "reason": "DEADMAN", "outputs": [0, 0]}},
+    {"t": 400, "rx": {"type": "Setpoint", "src": "b", "run_id": 42, "nonce": 99, "seq": 2, "t_ms": 290, "pwm_l": 170, "pwm_r": 170}, "expect": {"state": "LATCHED_STOP", "outputs": [0, 0], "counters": {"rx_ignored": 1}}},
+    {"t": 450, "expect": {"state": "LATCHED_STOP", "reason": "DEADMAN", "outputs": [0, 0]}}]},
+
+  {"name": "LATCHED_STOP is released by the physical re-arm only; the next ARM needs a newer run id",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}},
+    {"t": 301, "expect": {"state": "LATCHED_STOP", "reason": "DEADMAN"}},
+    {"t": 400, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 43, "nonce": 100, "pwm_cap": 210}, "expect": {"state": "LATCHED_STOP", "reason": "DEADMAN", "reject": "LATCHED", "sent": ["HELLO"]}},
+    {"t": 450, "rx": {"type": "Stop", "src": "b", "run_id": 42, "nonce": 99, "reason": 0}, "expect": {"state": "LATCHED_STOP"}},
+    {"t": 500, "physical_rearm": true, "expect": {"state": "DISARMED", "reason": "NONE", "reject": "NONE"}},
+    {"t": 510, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 100, "pwm_cap": 210}, "expect": {"state": "DISARMED", "reject": "RUN_OLD", "sent": ["HELLO"]}},
+    {"t": 520, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 43, "nonce": 100, "pwm_cap": 210}, "expect": {"state": "ARMED", "reject": "NONE", "sent": ["ECHO"]}}]},
+
+  {"name": "STOP end-of-run disarms without a latch; the same run id cannot be armed again",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}},
+    {"t": 110, "rx": {"type": "Setpoint", "src": "b", "run_id": 42, "nonce": 99, "seq": 1, "t_ms": 0, "pwm_l": 170, "pwm_r": 170}},
+    {"t": 200, "rx": {"type": "Stop", "src": "b", "run_id": 42, "nonce": 99, "reason": 0}, "expect": {"state": "DISARMED", "reason": "NONE", "sent": ["HELLO"]}},
+    {"t": 210, "expect": {"outputs": [0, 0]}},
+    {"t": 300, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}, "expect": {"state": "DISARMED", "reject": "RUN_OLD"}},
+    {"t": 310, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 43, "nonce": 100, "pwm_cap": 210}, "expect": {"state": "ARMED"}}]},
+
+  {"name": "STOP abort latches",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}},
+    {"t": 150, "rx": {"type": "Stop", "src": "b", "run_id": 42, "nonce": 99, "reason": 1}, "expect": {"state": "LATCHED_STOP", "reason": "BRIDGE_ABORT"}}]},
+
+  {"name": "STOP watchdog latches with its own reason",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}},
+    {"t": 150, "rx": {"type": "Stop", "src": "b", "run_id": 42, "nonce": 99, "reason": 2}, "expect": {"state": "LATCHED_STOP", "reason": "BRIDGE_WATCHDOG"}}]},
+
+  {"name": "an unknown stop reason is treated as an abort",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}},
+    {"t": 150, "rx": {"type": "Stop", "src": "b", "run_id": 42, "nonce": 99, "reason": 77}, "expect": {"state": "LATCHED_STOP", "reason": "BRIDGE_ABORT"}}]},
+
+  {"name": "an ARM naming another boot of the chassis is refused (a replayed ARM)",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 8, "run_id": 42, "nonce": 99, "pwm_cap": 210}, "expect": {"state": "DISARMED", "reject": "BOOT_ID", "sent": ["HELLO"]}}]},
+
+  {"name": "an ARM with cap 0, or above the chassis hard cap, is refused",
+   "params": {"hard_cap": 200},
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 0}, "expect": {"state": "DISARMED", "reject": "CAP"}},
+    {"t": 110, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 201}, "expect": {"state": "DISARMED", "reject": "CAP"}},
+    {"t": 120, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 200}, "expect": {"state": "ARMED", "reject": "NONE"}}]},
+
+  {"name": "Wi-Fi loss while armed latches; while disarmed it does nothing",
+   "steps": [
+    {"t": 50, "link_down": true, "expect": {"state": "DISARMED"}},
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}},
+    {"t": 150, "link_down": true, "expect": {"state": "LATCHED_STOP", "reason": "LINK_LOST"}}]},
+
+  {"name": "a repeated ARM is answered again; a second bridge is ignored; a contradicting ARM from the armed bridge latches",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}, "expect": {"state": "ARMED", "sent": ["ECHO"]}},
+    {"t": 120, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}, "expect": {"state": "ARMED", "sent": ["ECHO"]}},
+    {"t": 130, "rx": {"type": "Arm", "src": "c", "boot_id": 7, "run_id": 50, "nonce": 5, "pwm_cap": 210}, "expect": {"state": "ARMED", "reject": "OTHER_PEER", "sent": [], "counters": {"rx_foreign": 1}}},
+    {"t": 140, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 43, "nonce": 99, "pwm_cap": 210}, "expect": {"state": "LATCHED_STOP", "reason": "BAD_RUN"}}]},
+
+  {"name": "while armed the chassis echoes at 20 Hz",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}, "expect": {"sent": ["ECHO"]}},
+    {"t": 140, "rx": {"type": "Setpoint", "src": "b", "run_id": 42, "nonce": 99, "seq": 1, "t_ms": 0, "pwm_l": 0, "pwm_r": 0}, "expect": {"sent": []}},
+    {"t": 150, "expect": {"sent": ["ECHO"]}},
+    {"t": 200, "expect": {"sent": ["ECHO"]}},
+    {"t": 201, "expect": {"sent": []}}]},
+
+  {"name": "encoders (link v2): no sample yet reads mask 0 and zeros; a sample rides on the next ECHO with its own time and changes no state or pin",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}, "expect": {"sent": ["ECHO"], "echo": {"enc_t_ms": 0, "enc_mask": 0, "enc_fl": 0, "enc_fr": 0, "enc_rl": 0, "enc_rr": 0}}},
+    {"t": 110, "rx": {"type": "Setpoint", "src": "b", "run_id": 42, "nonce": 99, "seq": 1, "t_ms": 0, "pwm_l": 100, "pwm_r": 100}, "expect": {"sent": []}},
+    {"t": 120, "encoders": {"counts": [10, 11, 12, 13], "mask": 15}, "expect": {"state": "ARMED", "outputs": [100, 100], "sent": []}},
+    {"t": 150, "expect": {"sent": ["ECHO"], "echo": {"enc_t_ms": 120, "enc_mask": 15, "enc_fl": 10, "enc_fr": 11, "enc_rl": 12, "enc_rr": 13, "pwm_l": 100, "pwm_r": 100}}}]},
+
+  {"name": "encoders: counts wrap at 2^32, and a wheel outside the mask reads 0 (two sensors, front pair)",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}, "expect": {"sent": ["ECHO"]}},
+    {"t": 110, "encoders": {"counts": [4294967301, 7, 99, 99], "mask": 3}, "expect": {"sent": []}},
+    {"t": 150, "expect": {"sent": ["ECHO"], "echo": {"enc_t_ms": 110, "enc_mask": 3, "enc_fl": 5, "enc_fr": 7, "enc_rl": 0, "enc_rr": 0}}}]},
+
+  {"name": "encoders: the ECHO sent at a dead-man latch carries the latest sample (state 2 = LATCHED_STOP, reason 1 = DEADMAN)",
+   "steps": [
+    {"t": 100, "rx": {"type": "Arm", "src": "b", "boot_id": 7, "run_id": 42, "nonce": 99, "pwm_cap": 210}, "expect": {"sent": ["ECHO"]}},
+    {"t": 110, "rx": {"type": "Setpoint", "src": "b", "run_id": 42, "nonce": 99, "seq": 1, "t_ms": 0, "pwm_l": 120, "pwm_r": 120}},
+    {"t": 200, "encoders": {"counts": [50, 50, 50, 50], "mask": 15}, "expect": {"sent": ["ECHO"], "echo": {"enc_t_ms": 200, "enc_fl": 50}}},
+    {"t": 305, "encoders": {"counts": [61, 60, 62, 61], "mask": 15}, "expect": {"state": "ARMED", "outputs": [120, 120]}},
+    {"t": 311, "expect": {"state": "LATCHED_STOP", "reason": "DEADMAN", "sent": ["ECHO"], "echo": {"state": 2, "reason": 1, "enc_t_ms": 305, "enc_fl": 61, "enc_rr": 61}}}]}
+ ]
+}

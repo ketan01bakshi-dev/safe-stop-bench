@@ -31,14 +31,17 @@ class Actuators:
 
     def step(self, accel_cmd: float, steer_cmd: float, backup_decel: float, mu: float, dt: float) -> float:
         p = self.p
-        self.dead.append(accel_cmd)
+        # read BEFORE appending: the buffer then delays by exactly long_dead_time_ms (v2.39; it used to be one sample short,
+        # 79 ms and 49 ms, found by the P6 plant pipeline's back-to-back against the Modelica model)
         a_in = self.dead[0]
+        self.dead.append(accel_cmd)
         if a_in < 0:
             a_in *= self.brake_factor
         self.a_act += (a_in - self.a_act) * dt / p["long_tau_s"]
         self.a_act = max(-mu * G, min(p["max_accel"], self.a_act))
+        b_in = self.backup_dead[0]
         self.backup_dead.append(backup_decel)
-        self.backup += (self.backup_dead[0] - self.backup) * dt / p["long_tau_s"]
+        self.backup += (b_in - self.backup) * dt / p["long_tau_s"]
         if not self.steer_stuck:
             rate = p["steer_rate_dps"] * self.steer_rate_factor * dt
             target = max(-p["max_steer_deg"], min(p["max_steer_deg"], steer_cmd))
@@ -116,7 +119,7 @@ class DynamicVehicle(Vehicle):
 
 def grade_accel(veh: Vehicle, grade_pct: float) -> float:
     """What an IMU pitch estimate gives the safety controller: gravity along the slope (small angle in the kinematic model)."""
-    if isinstance(veh, DynamicVehicle):
+    if isinstance(veh, DynamicVehicle) or getattr(veh, "dynamic", False):   # the FMU plant's dynamic variant too
         return G * math.sin(math.atan(grade_pct / 100.0))
     return 9.81 * grade_pct / 100.0
 
@@ -128,6 +131,15 @@ def make_vehicle(cfg: dict, v0: float, payload_kg: float | None = None) -> Vehic
     if payload_kg:
         raise ValueError("a payload needs plant model 'dynamic' (the kinematic model has no mass)")
     return Vehicle(cfg, v0)
+
+
+def make_plant(cfg: dict, v0: float, payload_kg: float | None, road: dict) -> tuple:
+    """(actuators, vehicle) for one scenario: the Python models, or the released Modelica FMU (P6, plant model "fmu")."""
+    if cfg["plant"].get("model") == "fmu":
+        from .plant_fmu import FmuPlant
+        p = FmuPlant(cfg, v0, payload_kg, road)
+        return p.act, p.veh
+    return Actuators(cfg), make_vehicle(cfg, v0, payload_kg)
 
 
 ACT_ID = 0x200

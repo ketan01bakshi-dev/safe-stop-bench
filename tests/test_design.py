@@ -583,7 +583,7 @@ class SubscriptionRouteTests(unittest.TestCase):
                 d.mkdir(parents=True)
                 (d / "claude.exe").write_text("x")
             with mock.patch.dict("os.environ", {"APPDATA": tmp, "CLAUDE_CODE_BIN": ""}), mock.patch("shutil.which", lambda n: None), mock.patch(
-                    "pathlib.Path.exists", lambda self: False):   # not the shared D:/Agents/tools copy
+                    "pathlib.Path.exists", lambda self: False):   # not the shared tools copy
                 self.assertIn("2.1.293", claude_code_binary() or "")
 
 
@@ -642,6 +642,117 @@ class AutoRedraftTests(unittest.TestCase):
                   "coverage_item": "x"}]
         res = {"SR-01-FI-01": {"verdict": "SUSPECT", "peak_state": "NORMAL"}}
         self.assertEqual(campaign.redraft_reason([{"req": "SR-01", "drafted_by": "rules"}], cases, res), "")   # rules cannot redraft
+
+
+def envelope_draft(fault, params, covers="x", extra=None):
+    trig = [{"covers": covers, "fault": fault, "params": params, "cause": ["ENVELOPE"], "threshold": None, "why": "x"}]
+    return {"kind": "event", "reaction": "STOP_IN_LANE", "not_injectable": [], "open_questions": [],
+            "assumptions": ["50 is the persistence time; the bounds are -6 and 2.5; 10 is the jerk limit"], "triggers": trig + (extra or [])}
+
+
+class PersistenceTests(unittest.TestCase):
+    """v2.35: 'stop if it persists >= 50 ms' (SR-07 to SR-09): the durations belong to code, the range has two sides."""
+
+    def setUp(self):
+        from design import drafter
+        self.d = drafter
+
+    def test_persistence_and_range_are_found_by_code(self):
+        self.assertEqual(self.d.persistence(REQS["SR-07"]["text"]), {"op": ">=", "ms": 50})
+        self.assertEqual(self.d.value_range(REQS["SR-09"]["text"]), (-6.0, 2.5))
+        self.assertIsNone(self.d.persistence(REQS["SR-02"]["text"]))
+        self.assertIsNone(self.d.value_range(REQS["SR-08"]["text"]))
+
+    def test_duration_arithmetic_follows_the_frame_grid(self):
+        self.assertEqual(basis.persistence_cases(50, ">=", 20), (61, 60))     # frames at 0, 20, 40, 60: the 4th is >= 50 ms after the 1st
+        self.assertEqual(basis.persistence_cases(60, ">=", 20), (61, 60))
+        self.assertEqual(basis.persistence_cases(60, ">", 20), (81, 80))
+
+    def test_a_range_needs_a_trigger_on_each_side(self):
+        cat, causes, text = self.d.fault_catalogue(), self.d.known_causes(), REQS["SR-09"]["text"]
+        one = envelope_draft("accel_req", {"accel": 4.0})
+        self.assertIn("a value below -6", " | ".join(self.d.validate_event(one, text, cat, causes)))
+        both = envelope_draft("accel_req", {"accel": 4.0}, extra=envelope_draft("accel_req", {"accel": -8.0})["triggers"])
+        self.assertEqual(self.d.validate_event(both, text, cat, causes), [])
+
+    def test_prompt_states_the_two_rules_only_where_they_apply(self):
+        cat, causes = self.d.fault_catalogue(), self.d.known_causes()
+        ask = self.d.prompt("SR-09", REQS["SR-09"]["text"], cat, causes)[-1]["content"]
+        self.assertIn("persistence time, not a fault parameter", ask)
+        self.assertIn("has TWO sides", ask)
+        self.assertNotIn("TWO sides", self.d.prompt("SR-08", REQS["SR-08"]["text"], cat, causes)[-1]["content"])
+
+    def test_persistence_must_equal_the_controller_setting(self):
+        slow = copy.deepcopy(CFG)
+        slow["safety"]["env_debounce_ms"] = 100
+        b = basis.draft("SR-09", REQS, slow, llm=FakeLLM(envelope_draft("accel_req", {"accel": 4.0}, extra=envelope_draft("accel_req", {"accel": -8.0})["triggers"])))
+        self.assertEqual(b["kind"], "invalid")
+        self.assertIn("persistence 50 ms equals config safety.env_debounce_ms (100)", b["errors"])
+
+    def test_cases_for_an_exact_fault_and_a_smoothed_one(self):
+        acc = basis.draft("SR-09", REQS, CFG, llm=FakeLLM(envelope_draft("accel_req", {"accel": 4.0}, extra=envelope_draft("accel_req", {"accel": -8.0})["triggers"])))
+        pd = {c["id"]: c for c in derive.derive(acc, CFG) if "-PD-" in c["id"]}
+        self.assertEqual(len(pd), 6)                                          # 3 durations on each of the two sides
+        self.assertEqual([pd[f"SR-09-PD-0{i}"]["scenario"]["faults"][0]["end"] for i in (1, 2, 3)], [2061, 2060, 2030])
+        self.assertTrue(pd["SR-09-PD-01"]["scenario"]["expect"]["stop"])
+        self.assertTrue(pd["SR-09-PD-02"]["probe"] and pd["SR-09-PD-02"]["blocked"].startswith("GAP"))
+        self.assertTrue(any("shortest that stops" in q for q in acc["open_questions"]))
+        steer = basis.draft("SR-07", REQS, CFG, llm=FakeLLM(envelope_draft("steer_rate", {"dps": 90}, "Steering rate above the speed-dependent limit")))
+        sp = [c for c in derive.derive(steer, CFG) if "-PD-" in c["id"]]
+        self.assertEqual([(c["probe"], c["scenario"]["faults"][0]["end"]) for c in sp], [(True, 2020)])   # one probe, no boundary cases
+        self.assertTrue(any("planner smooths" in q for q in steer["open_questions"]))
+
+    def test_steering_rate_boundary_cases_come_from_the_controller_settings(self):
+        b = basis.draft("SR-07", REQS, CFG, llm=FakeLLM(envelope_draft("steer_rate", {"dps": 90}, "Steering rate above the speed-dependent limit")))
+        rl = {c["id"]: c for c in derive.derive(b, CFG) if "-RL-" in c["id"]}
+        self.assertEqual(len(rl), 9)                                              # 3 values at each of the 3 start speeds
+        dps = [rl[f"SR-07-RL-0{i}"]["scenario"]["faults"][0]["dps"] for i in (1, 2, 3)]
+        self.assertEqual(dps, [49.0, 48.0, 47.0])                                 # 10 km/h: limit 60 - 1.2 x 10 = 48
+        self.assertEqual(rl["SR-07-RL-04"]["scenario"]["faults"][0]["dps"], 25.0)  # 30 km/h: 24 + 1
+        self.assertEqual(rl["SR-07-RL-07"]["scenario"]["faults"][0]["dps"], 16.0)  # 39 km/h: floor 15 + 1
+        self.assertTrue(rl["SR-07-RL-01"]["scenario"]["expect"]["stop"])
+        self.assertTrue(rl["SR-07-RL-02"]["probe"] and rl["SR-07-RL-03"]["probe"])
+        self.assertTrue(any("no number" in q for q in b["open_questions"]))
+
+    def test_the_steering_margin_bug_is_caught_by_the_new_cases(self):
+        tmp = tempfile.TemporaryDirectory()
+        saved, campaign.DESIGN_DIR = campaign.DESIGN_DIR, Path(tmp.name)
+        try:
+            def run(name, defects=()):
+                llm = FakeLLM(envelope_draft("steer_rate", {"dps": 90}, "Steering rate above the speed-dependent limit"))
+                return campaign.run(name, ["SR-07"], defects=list(defects), auto_approve=True, llm_client=llm, log=lambda *a: None)
+            self.assertEqual(run("ok"), 0)
+            self.assertFalse((campaign.DESIGN_DIR / "tracker.json").exists())     # the healthy controller passes every RL case
+            self.assertEqual(run("bug", ["envelope_off_by_one"]), 0)
+            res = json.loads((campaign.DESIGN_DIR / "bug" / "04_triage" / "case_results.json").read_text(encoding="utf-8"))
+            self.assertEqual(res["SR-07-RL-01"]["verdict"], "FAIL")               # 1 deg/s over the limit passes the 5 deg/s margin: no stop
+            self.assertEqual(res["SR-07-FI-01"]["verdict"], "PASS")               # 90 deg/s never could show it
+        finally:
+            campaign.DESIGN_DIR = saved
+            tmp.cleanup()
+
+    def test_pattern_variants_skip_values_inside_the_range_and_repeats(self):
+        # SC-16 injects +2 m/s2 (inside -6..+2.5; it stops only because the planner returns during a stop) and SC-14 is +4 again
+        b = basis.draft("SR-09", REQS, CFG, llm=FakeLLM(envelope_draft("accel_req", {"accel": 4.0}, extra=envelope_draft("accel_req", {"accel": -8.0})["triggers"])))
+        pv = [c for c in derive.derive(b, CFG) if "-PV-" in c["id"]]
+        self.assertEqual(pv, [])
+        seen = [json.dumps(c["scenario"]["faults"], sort_keys=True) for c in derive.derive(b, CFG) if "-PV-" in c["id"] or "-FI-" in c["id"]]
+        self.assertEqual(len(seen), len(set(seen)))
+
+    def test_the_reference_controller_follows_the_derived_boundary(self):
+        tmp = tempfile.TemporaryDirectory()
+        saved, campaign.DESIGN_DIR = campaign.DESIGN_DIR, Path(tmp.name)
+        try:
+            llm = FakeLLM(envelope_draft("accel_req", {"accel": 4.0}, extra=envelope_draft("accel_req", {"accel": -8.0})["triggers"]))
+            self.assertEqual(campaign.run("pd", ["SR-09"], auto_approve=True, llm_client=llm, log=lambda *a: None), 0)
+            res = json.loads((campaign.DESIGN_DIR / "pd" / "04_triage" / "case_results.json").read_text(encoding="utf-8"))
+            self.assertEqual(res["SR-09-PD-01"]["verdict"], "PASS")           # 61 ms: stops
+            self.assertEqual(res["SR-09-PD-02"]["peak_state"], "NORMAL")      # 60 ms: clamped, no stop (a probe: information, not a verdict)
+            self.assertEqual(res["SR-09-PD-04"]["verdict"], "PASS")           # the braking side
+            self.assertFalse((campaign.DESIGN_DIR / "tracker.json").exists())
+        finally:
+            campaign.DESIGN_DIR = saved
+            tmp.cleanup()
 
 
 class BenchHealthTests(unittest.TestCase):

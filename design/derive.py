@@ -14,6 +14,7 @@ For a timed-loss requirement ("<trigger> for > N ms → <reaction>", FTTI F, fra
 """
 from __future__ import annotations
 
+import json
 import re
 
 
@@ -111,12 +112,20 @@ def derive_event(b: dict, cfg: dict) -> list[dict]:
     # passed every permanent-fault case of the first drafted SR-02 design
     from .drafter import fault_catalogue
     fcat = fault_catalogue()
+    from .drafter import value_range
+    rng = value_range(b.get("text", ""))
     pv = 0
+    seen = {json.dumps([t["fault"], t.get("params") or {}], sort_keys=True) for t in b["triggers"]}   # never the same injection twice
     for t in b["triggers"]:
         for ex in fcat.get(t["fault"], {}).get("examples", []):
             params = {k: x for k, x in ex["fault"].items() if k not in ("type", "end")}
             if params == (t.get("params") or {}) or ex["reaction"] != b["reaction"]:
                 continue
+            key = json.dumps([t["fault"], params], sort_keys=True)
+            nums = [x for x in params.values() if isinstance(x, (int, float))]
+            if key in seen or (rng and nums and all(rng[0] <= x <= rng[1] for x in nums)):
+                continue   # a repeat, or a value INSIDE the range (SC-16: +2 m/s2 stops only because the planner returns during a stop)
+            seen.add(key)
             pv += 1
             tv = {**t, "params": params, "bench_timing": {**ex["timing"], "from": ex["id"]}}
             add(f"PV-{pv:02d}", "EP (fault pattern)", f"\"{t['covers']}\" as in bench scenario {ex['id']}: {ex['title']}",
@@ -141,6 +150,47 @@ def derive_event(b: dict, cfg: dict) -> list[dict]:
                     f"{rid}{' probe' if probe else ''}: {t['fault']} with {th['param']} = {val:g}", req if not probe else [rid],
                     [fault(t, **{th["param"]: val})], {} if probe else expect(t), **timing(t)),
                 blocked=f"GAP: no requirement says what may happen at {th['param']} = {val:g}" if probe else None, probe=probe)
+    pers = b.get("persistence")
+    if pers:   # "stop if it persists >= N ms": duration BVA, the durations owned by code (basis.persistence_cases)
+        q = 0
+        for t in b["triggers"]:
+            start = fault(t)["start"]
+            if t["fault"] in pers["smoothed_faults"]:   # the breach outlives the injection: one probe documents it, no boundary cases
+                q += 1
+                d = pers["period_ms"]
+                add(f"PD-{q:02d}", "BVA3 (persistence)", f"\"{t['covers']}\" lasting {d} ms: the planner smooths {t['fault']}, so the breach outlives it",
+                    _sc(f"{rid}-PD-{q:02d}", f"{tag}_pd{q:02d}_{t['fault']}_{d}ms_probe", f"{rid} probe: {t['fault']} for {d} ms, then back to normal",
+                        [rid], [fault(t, end=start + d)], {}, start_kmh=mid, **timing(t)),
+                    blocked=f"GAP: the persistence boundary cannot be set through {t['fault']} (the planner smooths it)", probe=True)
+                continue
+            if t["fault"] not in pers["faults"]:
+                continue
+            for k, (d, how) in enumerate(((pers["first_stop_ms"], "shortest breach that stops"),
+                                          (pers["longest_no_stop_ms"], "longest breach the controller still tolerates"),
+                                          (pers["ms"] - pers["period_ms"], "well below the persistence time"))):
+                q += 1
+                probe = k > 0
+                add(f"PD-{q:02d}", "BVA3 (persistence)", f"\"{t['covers']}\" lasting {d} ms ({how})",
+                    _sc(f"{rid}-PD-{q:02d}", f"{tag}_pd{q:02d}_{t['fault']}_{d}ms" + ("_probe" if probe else ""),
+                        f"{rid}{' probe' if probe else ''}: {t['fault']} for {d} ms, then back to normal", req if not probe else [rid],
+                        [fault(t, end=start + d)], {} if probe else expect(t), start_kmh=mid, **timing(t)),
+                    blocked=f"GAP: no requirement says what may happen when the breach lasts only {d} ms" if probe else None, probe=probe)
+    s = cfg["safety"]
+    r = 0
+    for t in b["triggers"]:   # "steering rate above the SPEED-DEPENDENT limit": the number is not in the requirement, the controller's settings hold it
+        if t["fault"] != "steer_rate" or "steer_rate_max_dps" not in s:
+            continue
+        for name, v in sp:
+            lim = max(s["steer_rate_min_dps"], s["steer_rate_max_dps"] - s["steer_rate_slope"] * v)   # same formula as ssb.scenarios.boundary
+            for k, (val, how) in enumerate(((lim + 1, "1 deg/s above the limit"), (lim, "exactly at the limit"), (lim - 1, "1 deg/s below the limit"))):
+                r += 1
+                probe = k > 0
+                add(f"RL-{r:02d}", "BVA3 (rate limit)", f"steering rate {val:g} deg/s at {v:g} km/h ({name}; limit {lim:g} deg/s): {how}",
+                    _sc(f"{rid}-RL-{r:02d}", f"{tag}_rl{r:02d}_{val:g}dps_{v:g}kmh" + ("_probe" if probe else ""),
+                        f"{rid}{' probe' if probe else ''}: steering rate {val:g} deg/s at {v:g} km/h (limit {lim:g})", req if not probe else [rid],
+                        [{"type": "steer_rate", "start": 5000, "end": 5120, "dps": val}], {} if probe else expect(t), start_kmh=v,
+                        inject_ms=5000, duration_ms=11000),   # injected at 5 s so the speed has settled, as in the bench's own boundary scenarios
+                    blocked=f"GAP: no requirement says what may happen at {val:g} deg/s (limit {lim:g}) in this basis" if probe else None, probe=probe)
     for g, x in enumerate(b.get("not_injectable") or [], 1):
         add(f"GAP-{g:02d}", "FI (alternative)", f"\"{x['covers']}\"", None, blocked=f"GAP: not injectable on this bench ({x['reason']})")
     return cases

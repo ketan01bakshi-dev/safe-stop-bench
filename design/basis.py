@@ -45,7 +45,7 @@ def draft(req_id: str, reqs: dict, cfg: dict, cat: dict | None = None, llm=None,
     m = TIMED.match(r["text"])
     if not m and llm is not None:
         from . import drafter
-        return finish_event(drafter.draft(req_id, r, llm, feedback=feedback), reqs, cat)
+        return finish_event(drafter.draft(req_id, r, llm, feedback=feedback), reqs, cat, cfg)
     if not m:
         return {"req": req_id, "text": r["text"], "kind": "unparsed", "drafted_by": "rules",
                 "errors": ["wording is not '<trigger> for > N ms → <reaction>': needs design/basis/<req>.json or an LLM draft"]}
@@ -98,15 +98,51 @@ def validate(b: dict, reqs: dict, cfg: dict, cat: dict) -> dict:
     return out
 
 
-def finish_event(b: dict, reqs: dict, cat: dict) -> dict:
-    """Code-owned fields of an LLM-drafted event basis: latch, FTTI check, gaps for alternatives the bench can't inject."""
+def persistence_cases(n: int, op: str, period: int) -> tuple[int, int]:
+    """(first breach duration that stops, longest that does not) for 'stop if it persists >= n ms' judged once per `period` ms frame.
+    A breach starting on a frame is seen at start, start+P, ...; it stops at the first frame k*P with k*P >= n (> n for '>'), and that
+    frame has to be inside the breach (fault window end is exclusive), so the shortest stopping breach is k*P + 1 ms."""
+    k = -(-n // period) if op == ">=" else n // period + 1
+    return k * period + 1, k * period
+
+
+def finish_event(b: dict, reqs: dict, cat: dict, cfg: dict | None = None) -> dict:
+    """Code-owned fields of an LLM-drafted event basis: latch, FTTI check, gaps for alternatives the bench can't inject,
+    and the persistence time ("stop if it persists >= 50 ms"), which the model neither sets nor sees as a parameter."""
     if b.get("kind") != "event":
         return b
+    from .drafter import persistence
     latch = cat.get("latch_requirement")
     checks = [{"rule": "drafter checks passed (faults, params, causes, alternatives, numbers)", "ok": True},
               {"rule": f"FTTI given ({b.get('ftti_ms')} ms)", "ok": bool(b.get("ftti_ms"))},
               {"rule": f"stop reactions are latched by {latch} (exists)", "ok": latch in reqs}]
     qs = list(b.get("open_questions") or [])
+    pcat, pers, persist = cat.get("persistence"), persistence(b.get("text", "")), None
+    if pcat and pers and any(t["fault"] in pcat["faults"] + pcat["smoothed_faults"] for t in b["triggers"]):
+        n, per, ftti = pers["ms"], pcat["frame_period_ms"], b.get("ftti_ms")
+        have = ((cfg or {}).get("safety") or {}).get(pcat["config_threshold"])
+        checks.append({"rule": f"persistence {n} ms equals config safety.{pcat['config_threshold']} ({have})", "ok": have == n})
+        checks.append({"rule": f"FTTI {ftti} ms ≥ persistence {n} ms + one {pcat['message']} period ({per} ms)", "ok": bool(ftti) and ftti >= n + per})
+        first, longest = persistence_cases(n, pers["op"], per)
+        persist = {"op": pers["op"], "ms": n, "period_ms": per, "faults": pcat["faults"], "smoothed_faults": pcat["smoothed_faults"],
+                   "first_stop_ms": first, "longest_no_stop_ms": longest}
+        if any(t["fault"] in pcat["faults"] for t in b["triggers"]):
+            qs.append(f"{b['req']} says a breach that persists {pers['op']} {n} ms stops the vehicle. The controller judges once per {per} ms "
+                      f"command frame, so a breach has to reach the frame {longest} ms after its start: {first} ms is the shortest that stops "
+                      f"and a {longest} ms breach is clamped without a stop. Is that the intended reading of {n} ms? Breaches shorter than "
+                      f"{first} ms are blocked and run as probes: no requirement says they must not stop.")
+        sm = [t["fault"] for t in b["triggers"] if t["fault"] in pcat["smoothed_faults"]]
+        if sm:
+            qs.append(f"The persistence boundary of {b['req']} cannot be tested through {', '.join(sm)}: the planner smooths that signal, so the "
+                      f"breach outlives the injection and the {n} ms boundary cannot be set (measured on the reference: speed_req stops at "
+                      f"{per} ms, steer_rate at 30 ms). One probe documents it; "
+                      f"testing the boundary would need a plant-side or sensor-side injection.")
+    sc = ((cfg or {}).get("safety") or {})
+    if "steer_rate_max_dps" in sc and any(t["fault"] == "steer_rate" for t in b["triggers"]):
+        qs.append(f"{b['req']} names a speed-dependent steering-rate limit but gives no number. The RL cases take it from the controller's own "
+                  f"settings, max({sc['steer_rate_min_dps']:g}, {sc['steer_rate_max_dps']:g} - {sc['steer_rate_slope']:g} x km/h) deg/s, and test 1 deg/s "
+                  f"above it (must stop), at it and 1 below it (probes). They check the implementation against its own configuration; "
+                  f"which limit the requirement intends has to be confirmed by its owner.")
     qs += [f"'{x['covers']}' cannot be injected on this bench ({x['reason']}): blocked GAP case" for x in b.get("not_injectable") or []]
     for t in b["triggers"]:
         th = t.get("threshold")
@@ -131,6 +167,8 @@ def finish_event(b: dict, reqs: dict, cat: dict) -> dict:
             qs.append(note)
         triggers.append(t)
     out = {**b, "triggers": triggers, "stop": True, "latched_by": latch, "checks": checks, "open_questions": qs}
+    if persist:
+        out["persistence"] = persist
     if not all(c["ok"] for c in checks):
         out.update(kind="invalid", errors=[c["rule"] for c in checks if not c["ok"]])
     return out

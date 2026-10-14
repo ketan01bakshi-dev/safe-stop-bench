@@ -10,6 +10,15 @@
   "reactions": {
     "stop in lane": {"reaction": "STOP_IN_LANE", "stop": true}
   },
+  "persistence": {
+    "_note": "v2.35: '... stop if it persists >= N ms' (SR-07 to SR-09). The controller judges a breach once per command frame, so it stops at the first breached frame that is N ms or more after the first one (config safety.env_debounce_ms). Code owns the durations of the cases; the model never sets them.",
+    "config_threshold": "env_debounce_ms",
+    "frame_period_ms": 20,
+    "message": "PLN_Command",
+    "faults": ["accel_req"],
+    "smoothed_faults": ["steer_rate", "speed_req"],
+    "_smoothed_note": "Measured on the reference (v2.35): accel_req follows the model exactly (a 61 ms injection stops, 60 ms does not). steer_rate and speed_req go through the planner's own smoothing, so the breach outlives the injection: speed_req stops already at 20 ms, steer_rate stays NORMAL at 20 ms and stops at 30 ms. The fault duration is not the breach duration, and the 50 ms boundary cannot be set through them."
+  },
   "latch_requirement": "SR-05",
   "start_speeds_note": "EP over the start speed: low, mid and just inside the ODD limit (from the config)"
 }

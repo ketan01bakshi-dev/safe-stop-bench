@@ -9,6 +9,12 @@ broker_passwd
 wifi_secrets*.h
 .env.wifi
 *.egg-info/
+vehicle/out/*.mp4
+
+# P6 plant releases: FMU binaries stay out of git (release.json + certificate carry their hashes)
+plant/releases/*/*.fmu
+# P6 plant pipeline run folders (generated C, executables, result CSVs); the latest certificate is tracked
+reports/plant/*/
 reports/
 fmu/*.fmu
 hil/build/

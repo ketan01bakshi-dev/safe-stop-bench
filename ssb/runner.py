@@ -11,7 +11,7 @@ from . import e2e
 from .bus import VirtualBus
 from .dut import BenchFault, DeviceUnderTest, Outputs, ReferenceDUT
 from .planner import CMD_ID, Planner, active
-from .plant import ActuatorECU, Actuators, grade_accel, make_vehicle
+from .plant import ActuatorECU, grade_accel, make_plant
 from .safety import LATCHED, RANK
 
 DATA_ID = 0x1234
@@ -100,7 +100,8 @@ def _run_once(sc: dict, cfg: dict, dut: DeviceUnderTest | None, seed: int, keep_
         ids = Ids.default(sc.get("ids"))
     bp = VirtualBus("planner", cfg["buses"]["planner"]["frames_per_ms"], cfg["buses"]["planner"]["latency_ms"], rng)
     ba = VirtualBus("actuator", cfg["buses"]["actuator"]["frames_per_ms"], cfg["buses"]["actuator"]["latency_ms"], rng)
-    ecu, act, veh = ActuatorECU(cfg), Actuators(cfg), make_vehicle(cfg, v0, sc.get("payload_kg"))
+    ecu = ActuatorECU(cfg)
+    act, veh = make_plant(cfg, v0, sc.get("payload_kg"), road)
     veh.mu = road["mu"]
     releases = {e["t"] for e in sc.get("events", []) if e["type"] == "release"}
     lim = cfg["safety"]

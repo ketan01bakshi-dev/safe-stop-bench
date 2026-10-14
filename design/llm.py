@@ -43,7 +43,7 @@ def claude_code_binary() -> str | None:
         return explicit
     if shutil.which("claude"):
         return shutil.which("claude")
-    shared = Path(__file__).resolve().parents[3] / "tools" / "claude-code" / "claude.exe"   # D:/Agents/tools/claude-code/
+    shared = Path(__file__).resolve().parents[3] / "tools" / "claude-code" / "claude.exe"   # <workspace>/tools/claude-code/
     if shared.exists():
         return str(shared)
     appdata = os.environ.get("APPDATA", "")

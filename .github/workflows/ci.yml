@@ -77,3 +77,26 @@ jobs:
         with:
           name: report-can-lockstep
           path: reports/
+
+  # P6 (v2.39): the Modelica plant through its CI/CT stages (L0 spec + check + units, L1 hand calculations + convergence +
+  # seeded model mutants, L2 back-to-back + 56-scenario bench regression with the FMU plant). Exit 1 = a level check red.
+  plant:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: OpenModelica/setup-openmodelica@v1.2.0
+        with:
+          version: '1.26'
+          packages: |
+            'omc'
+      - run: pip install -e ".[fmu]"
+      - run: python -m unittest -v tests.test_plant_ci
+      - run: python -m plant.ci all
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: plant-certificate
+          path: reports/plant/

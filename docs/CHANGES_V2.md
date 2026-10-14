@@ -386,6 +386,115 @@ Lessons 1–4 matter for any PC-based vECU test setup, not only this one.
 - **Test the test:** after the bench run the same cases run on the clean reference controller; a case that fails there is `SUSPECT`, listed under "Suspect cases (not filed as defects)" with the drafter's own assumptions, and kept out of the defect drafts. Re-run of SR-02 with the same Sonnet draft: nothing filed. A real seeded bug (`e2e_lenient`) is still filed, without the suspect case in it.
 - **Tests (113):** the GitHub tracker against a fake API, a campaign filing to it and commenting on the rerun, the bad-repo guard, the suspect-case logic on the exact failing draft.
 
+## v2.39: P6 started: the plant model in OpenModelica, with CI/CT/CD and a maturity ladder; the reference plant's dead time fixed (14 Oct 2026)
+
+**What it is.** The vehicle and actuator plant (`ssb/plant.py`) restated as a Modelica model (`plant/modelica/SafeStopPlant.mo`,
+two classes: kinematic and force-based vehicle), with a falsifiable specification (`plant/spec/plant_spec.md`) and a pipeline,
+`python -m plant.ci`, that grades it on a maturity ladder (`plant/maturity/ladder.json`): **L0** specified (spec complete, checkModel,
+unit check), **L1** verified (hand calculations in closed form, never the solver; convergence at two solver tolerances with both
+values reported; nine seeded model bugs that must all be caught), **L2** back-to-back (the FMU against `ssb/plant.py` on 14 drives,
+then all 56 bench scenarios with the FMU as the plant), **L3** validated (needs measured data; the vehicle plant has none and tops
+out at L2), **L4** released through a hash-bound human gate (`python -m plant.ci release`). Failures are attributed MODEL, CHECK or
+TOOL; a TOOL failure blocks the run and never counts as a pass or a model failure. Tolerances are fixed in the ladder file, whose
+hash is in the certificate. The method follows the owner's own evaluation approach (hand calculation against the solver, two-point
+convergence, named shortcuts, attribution). Simulink was considered and rejected for this: no free route to a private CI pipeline.
+
+**Result: L2.** L0 5/5, L1 36/36, every seeded bug caught by a check that is green on the clean model, L2 15/15: 14 drives within
+the fixed tolerance (worst at 75 % of its limit), all 56 scenarios with the same verdicts (55 PASS + 1 KNOWN), largest stop-distance
+difference 0.03 m. The bench runs the released FMU with `python run.py --plant fmu:<path>` (`ssb/plant_fmu.py`).
+
+**Findings (each fixed, each now guarded by a check).** (1) Modelica's `delay()` returns the input's value at t = 0 before the
+delay has elapsed, so a brake request present at start acted with no dead time: the L1 hand calculation showed a stop 0.667 m
+(v0 x 80 ms) short. (2) **The bench's own reference plant delayed 79 ms, not 80** (backup brake 49, not 50): `ssb/plant.py` read its
+buffer after appending. The L2 back-to-back exposed it (with 79 ms in the model every drive passed). The owner chose to fix the
+reference: the buffer is now read before appending. Reference matrix after the fix: 55/56 + 1 known, unchanged; full suite green.
+Every simulated actuator response is now 1 ms later than in v2.38 and earlier runs. (3) A fixed-step FMU parks a hair below zero
+speed; the bench and the controller test standstill as `v == 0.0`, so seven scenarios never "stopped" with the FMU plant. Fixed in the
+model (reset to exactly zero, spec R7).
+
+**Tool findings.** omc checks units only while translating and only through parameters (a folded package constant is invisible),
+so gravity is a parameter and a seeded unit error proves the check can fail. Right after a fresh compile omc sometimes reports
+"Simulation execution failed" although a re-run of the executable succeeds (seen with and without spaces in the path; cause not
+isolated): the pipeline re-launches it up to 3 times and logs each retry (`health/error_catalogue.json`: omc-exec-failed).
+
+**Also.** `design/gates.HumanGate` takes the approve/reject commands shown in its review packet as arguments (the plant release
+gate reuses it). New CI job `plant` (OpenModelica on Linux via OpenModelica/setup-openmodelica). OpenModelica 1.26.9 installed on
+the laptop with the owner's OK (`plant/tools.json`). 11 new tests (`tests/test_plant_ci.py`); full suite 349 OK (2 skipped).
+Docs: `docs/PLANT_MODEL_PIPELINE.md`, INTEGRATION_PLAN P6-P9 section and claims row.
+
+Changes: `plant/` (new), `ssb/plant.py` (dead-time buffer, `make_plant`), `ssb/plant_fmu.py` (new), `ssb/runner.py`, `run.py`
+(`--plant fmu:`), `design/gates.py`, `health/error_catalogue.json`, `tests/test_plant_ci.py`, `.github/workflows/ci.yml`,
+`pyproject.toml` (2.39, extra `plant`), `.gitignore`, docs.
+
+## v2.38: P5 link version 2: wheel encoders in ECHO (13 Oct 2026)
+
+**Why.** The owner moved the wheel encoders from stage 6 to stage 3 (four slot sensors on the existing 20-slot discs), so the stage 3 floor calibration
+measures wheel speed. The counts have to reach the laptop, and the stage 2 firmware port needs a fixed target, so the frame changes now, before any firmware.
+
+**What changed.** ECHO gains `enc_t_ms` (chassis uptime of the sample), `enc_mask` (sensors fitted: bit 0 FL, 1 FR, 2 RL, 3 RR) and four cumulative
+rising-edge counts (u32, wrapping); 31 to 52 bytes of body. The version byte moves from 1 to 2 for every type, so a stage 1 peer and a version 2 peer refuse
+each other's frames instead of misreading them. `ChassisCore.set_encoders(now, counts, mask)` is the PCNT sample; the next ECHO carries it; a wheel outside the
+mask reads 0. The counts never change a state or a pin. The bridge records `enc_mask` and `enc_last` in its summary (every ECHO is already in its log): a witness, not a verdict.
+
+**Tests.** 3 new hand-written conformance cases (27 in all: no sample reads mask 0 and zeros; a sample rides on the next ECHO with its own time; u32 wrap and an
+unfitted wheel read 0; the ECHO at a dead-man latch carries the latest sample) and a new mutant (a core that ignores the mask) that the cases catch. Codec: a v2 ECHO
+assembled by hand, a version 1 ECHO refused, encoder fields out of range refused, two new golden frames (four encoders; front pair only). A virtual-clock run with
+placeholder wheels gives the bridge the counts and leaves the pins exactly as in the run without encoders. 3 new tests; full suite 338 OK (2 skipped); ruff clean; mypy on the four link modules shows only the one error that was already there (`fake_chassis.py`, the STOP-reason lookup).
+
+**Baseline unchanged** (`ssb/` untouched).
+
+Changes: `vehicle/link.py`, `vehicle/fake_chassis.py`, `vehicle/bridge.py`, `vehicle/conformance.py`, `vehicle/link_cases.json`, `vehicle/link_vectors.json`,
+`vehicle/README.md`, `tests/test_p5_link.py`, `docs/P5_LINK_CONTRACT.md`, `docs/P5_WITNESS_PLAN.md`. Nothing touched a chassis.
+
+## v2.37: P5 stage 1: the replay driver, the chassis link contract and a fake chassis (12 Oct 2026)
+
+**What it is.** Everything between "a recorded run" and "the motor pins" that can be built and tested without hardware, so that stage 2 (the chassis board) is a port with a fixed target. `docs/P5_LINK_CONTRACT.md` is the contract: one UDP datagram per message (HELLO, ARM, SETPOINT at 20 Hz, STOP, ECHO at 20 Hz; CRC-16, a boot id, a run id and a nonce against stale packets, no authentication and no motion over MQTT or TCP), a chassis state machine (DISARMED, ARMED, LATCHED_STOP; dead-man, bad nonce, old run, out-of-range PWM, Wi-Fi loss and abort latch; **only a physical control releases a latch**), and a bridge that refuses to arm a wrong build or a latched chassis, has its own 100 ms watchdog and sends STOP from a `finally`.
+
+**Code (`vehicle/`).** `link.py` (frames, golden vectors), `fake_chassis.py` (`ChassisCore`, a pure state machine with injected time, and `UdpChassis`, the same core on a socket), `replay.py` (the 20 ms trace sampled at 50 ms, mapped to PWM with the stage 0 placeholder scale and joined with the inject time, state changes, events and expected outcome, tied to its source by a trace hash), `bridge.py` (sans-I/O `Bridge`, a real-time UDP runner, a command line with `--sim`, `--fake` and a guarded `--listen`), `simnet.py` (bridge and chassis on a virtual clock with scripted faults), `conformance.py` and `link_cases.json` (24 chassis cases whose expected values were written by hand from the contract; the firmware port must pass the same file).
+
+**Results.** On the virtual clock all six (variant, scenario) replays complete and the pins only ever carry plan values; the pins reach zero within 13 ms of the plan's stop step (2 ms link delay plus one 10 ms writer tick). A bridge that dies without a STOP is stopped by the dead-man at **exactly 201 ms** after the last valid setpoint and the pins are zero within one 10 ms writer tick, so **at most 211 ms plus link delay**; this is the number stage 2 measures on an independent clock. Losing 2 setpoints in a row (a 150 ms gap) or 3 (exactly 200 ms) is tolerated, losing 4 (250 ms) latches. A 300 ms hole latches and the chassis stays stopped when the setpoints return; a stale run id or a wrong nonce on the wire, a Wi-Fi drop, a silent chassis (the bridge's watchdog fires at 101 ms) and a dead bridge each latch the chassis and end the take as `ABORTED`, which is INCONCLUSIVE and never a result; a frame from another address, even a perfect STOP, changes nothing. The conformance runner is itself checked: a core with a 300 ms dead-man, one that does not latch on a bad nonce and one whose dead-man never fires each fail cases. A real-time rehearsal over UDP loopback against the fake chassis completed (280 setpoints, no late tick, no bad frame).
+
+**Findings.** (1) The seeded bugs change what the chassis must be asked to do: the plan's peak PWM is 203 for the correct build, 209 for `no_latch` after a 300 ms loss and **232 for `long_timeout`** after a permanent loss (it stops late and the planner keeps accelerating), so the cap in ARM is chosen per plan and the chassis latches on a setpoint above it. (2) On Windows the fake chassis sent one echo per 62 ms instead of 50 and the longest gap was 64 ms, which fits the 15.6 ms timer tick; the 100 ms watchdog has about 36 ms of margin there (a finer timer or a busy-wait is a stage 2 decision; an ESP32 task ticks at 1 ms). (3) A latched chassis now sends HELLO instead of ECHO, so a new bridge sees why it is stopped (my first design kept echoing at 20 Hz to the old peer; while writing the test for a second run I saw that a new bridge would have waited and reported "no chassis", so it was changed before it ran).
+
+**Beyond the P5 note:** `boot_id` (a recorded ARM cannot arm a rebooted chassis), `last_run_id` in HELLO, a refusal reason in HELLO and ECHO, and a planned end that returns to DISARMED without a latch (otherwise every good take needs the button).
+
+**Baseline unchanged** (`ssb/` is untouched: reference matrix 55/56 + 1 known). 35 new tests (`tests/test_p5_link.py`: codec incl. every single-bit error, conformance and mutants, plan, virtual-clock link, three real UDP smoke tests, command line); full suite 335 OK (2 skipped); ruff clean, mypy `ssb` clean. Nothing touched a chassis.
+
+Changes: `vehicle/` (`link.py`, `fake_chassis.py`, `replay.py`, `bridge.py`, `simnet.py`, `conformance.py`, `link_cases.json`, `link_vectors.json`, README, `p5_runs.chassis_pwm(v, k)`), `tests/test_p5_link.py`, `docs/P5_LINK_CONTRACT.md`, `docs/P5_WITNESS_PLAN.md`, `docs/INTEGRATION_PLAN.md`, `pyproject.toml`.
+
+## v2.36: P5 started: the chassis as a physical witness; stage 0, the offline contrast (12 Oct 2026)
+
+**What a read-only review found first.** The plan said "replace the plant model with the chassis, speed feedback from the chassis" and named another project folder as the chassis. Both were wrong: that folder is the traffic-light camera demo; the vehicle is `D:\Automotive-Embedded\sketch_ADAS_OTA` (EdgeHex S3, L298N, open-loop PWM). It has **no speed feedback** (speed is PWM times a constant; no encoder, IMU or CAN), **no forward obstacle sensing** (the front ultrasonic sensor is compiled out), and its old firmware auto-cruises at PWM 210 from power-up with no stop on link loss. Three approaches were designed independently (PC over MQTT, board A as a bridge, a CAN-native chassis node), judged on hardware reality, test validity and value, then synthesized and criticised; the chosen one is **witness-first replay**, with live coupling, encoders and AEB with real sensors as later, gated stages. The owner decided: start stage 0, return to P1 when the ordered parts arrive, the chassis EdgeHex is a separate board, and the "AEB" wording stays as the goal. The word carries a claim gate (an obstacle hazard, a SafetyNode input, a scenario and oracle, a validated forward sensor). Full note: `docs/P5_WITNESS_PLAN.md`.
+
+**Stage 0 (no hardware).** `vehicle/p5_scenarios.json`: cold start to 20 km/h, the command stream lost at 4.5 s, for good (P5-01) or for 300 ms (P5-01L; SC-15 is 200 ms). `vehicle/p5_runs.py` runs them on the reference controller and reads every number from the traces; `vehicle/tools/make_timeline.py` draws the contrast (PNG, optional MP4). Results: the correct build stops at 7.38 s after **25.0 m** of model travel, latched; **`no_latch`** stops and then **drives on** after a 300 ms loss (back in NORMAL at 4.84 s, 20 km/h and 69 m at 14 s); **`long_timeout`** stops at 34.1 m (**+9.1 m**) after a permanent loss and **never reacts** to a 300 ms one. The planner overshoots (peak **23.8 km/h** at a 20 km/h target), so any chassis cap and runway must be sized on the peak. The mapping to the chassis (k = 0.0612, 25.0 m of model travel is 1.53 m of floor) is a labelled placeholder until the floor calibration.
+
+**Two things the in-process run taught.** A hand-built DUT factory must warm-start only scenarios that start above 0 km/h, as `run.py` does; without it the cold-start check fails and the stop distance moves from 25.0 to 25.2 m. And the saved trace has no cause or inject marks (only t, speed, lateral, state, x every 20 ms): the replay input has to join it with the result's state changes and the scenario's inject time.
+
+**Baseline unchanged:** reference matrix 55/56 + 1 known (46 hand-written + 10 generated scenarios). 6 new tests (`tests/test_p5.py`); optional extra `p5` (matplotlib). Docs: the integration plan's chassis row and P5 section are corrected and a P5 claim row added.
+
+Changes: `vehicle/` (`p5_scenarios.json`, `p5_runs.py`, `tools/make_timeline.py`, README, `out/`), `tests/test_p5.py`, `docs/P5_WITNESS_PLAN.md`, `docs/INTEGRATION_PLAN.md`, `pyproject.toml`, `.gitignore`.
+
+## v2.35: test design for the persistence requirements SR-07 to SR-09 (12 Oct 2026)
+
+**What was open (P1):** "stop if it persists ≥ 50 ms" (steering rate, speed request, acceleration) had no trigger kind in the design pipeline. A first model draft of SR-07..09 parsed and passed the code checks, but it had no case for the persistence time (the 50 ms went into an assumption) and, for SR-09, only the upper bound of "outside −6…+2.5 m/s²" (the braking side was missing).
+
+**What the pipeline does now (code decides, the model drafts):**
+- `design/drafter.py` finds the persistence time and the two bounds of a range in the requirement text. The prompt tells the model that the persistence time is not a fault parameter and that a range has two sides; a draft with a trigger on one side only is sent back for repair.
+- `design/basis.py` checks the persistence time against the controller setting (`safety.env_debounce_ms`) and the FTTI against persistence plus one command period (20 ms), and computes the two durations that matter: the shortest breach that stops and the longest that does not (`persistence_cases`). They go into the basis as open questions for the reviewer.
+- `design/derive.py` adds the cases `PD-nn`: the shortest stopping breach (executable), the longest tolerated one and one well below it (blocked GAP, run as probes, because no requirement says a shorter breach must not stop).
+
+**A measurement that changed the design.** On the reference controller, `accel_req` follows the model exactly: a 61 ms injection stops (detected at 70 ms), a 60 ms one is clamped and the vehicle keeps driving, for both the +4 and the −8 m/s² side. **`steer_rate` and `speed_req` do not**: the planner smooths those signals and the breach outlives the injection (`speed_req` stops already at a 20 ms injection; `steer_rate` stays NORMAL at 20 ms and stops at 30 ms; a first version of this entry said both stop at 20 ms, which the campaign's own probe showed to be wrong for steering). So the boundary can only be tested through acceleration; for the other two the pipeline derives one probe and states, as an open question, that the boundary needs a plant-side or sensor-side injection.
+
+**On the two boards (campaign `2026-10-12_sr07_09_hil`):** the same 12 PASS / 7 INFO / 1 blocked, detection 68 to 72 ms, no defect; the 61 ms and 60 ms acceleration boundary holds on the hardware too.
+
+**Seeded-bug check** (the 18 approved scenarios against every mutant and two changes of the debounce setting, reference controller): the healthy controller has 0 FAIL. `no_latch` is caught by 12 cases. A **slow debounce (150 ms instead of 50)** is caught by 3 (`SR-09-PD-01`, `SR-09-PD-04` and `SR-07-EP-01`). **Not caught:** `envelope_off_by_one` (steering limit compared with a 5 deg/s margin), because every steering case injects 90 deg/s, far above the limit; and a **fast debounce (20 ms)**, which only shows in the probes (the 60 ms and 30 ms breaches stop), because no requirement says a short breach must not stop, so a probe can never be a verdict. The other ten mutants lie outside SR-07..09's mechanism. The first is a design gap, not a bench gap: "speed-dependent limit" has no number in the requirement, so the pipeline derives no boundary case on the steering rate; deriving one from the controller setting (`safety.steer_rate_*`) is the next step. The second is an open question for the requirement owner.
+
+**Steering-rate boundary (`RL-nn`, SR-07).** The seeded-bug check showed `envelope_off_by_one` slipping through, because every steering case injects 90 deg/s. The requirement's "speed-dependent limit" has no number, so the cases take it from the controller's settings (`max(15, 60 - 1.2 x km/h)`, the formula of the bench's own boundary scenarios): at 10, 30 and 39 km/h, 1 deg/s above the limit (must stop; executable), exactly at it and 1 below (probes). The basis says so as an open question for the requirement's owner. The healthy controller passes every executable case and the 5 deg/s margin bug is now caught by `SR-07-RL-01`. Campaigns `2026-10-12_sr07_rl` (reference) and `..._rl_hil` (both boards): RL-01 and RL-04 PASS (stop in 68 to 70 ms), the at- and below-limit probes stay NORMAL, nothing filed. Two observations: `RL-07` (39 km/h, 1 deg/s over the floor) is SUSPECT on the reference (it stops, but the lane check |y| <= 0.9 m fails on the healthy controller too; it passes on the boards), and the probe exactly AT the 15 deg/s floor (`RL-08`) stops at 110 ms whereas the same probe at 10 and 30 km/h stays NORMAL (a comparison at the floor value; a probe, not a verdict).
+
+**Tests:** 7 new (parsing, duration arithmetic, two-sided range, prompt rules, config mismatch, case derivation for an exact and a smoothed fault, and a campaign on the reference: PD-01 PASS, the 60 ms probe stays NORMAL); the design suite is 60 tests. The campaign `2026-10-12_sr07_09` stands at `basis_review`, waiting for the owner.
+
+Changes: `design/catalogue.json` (`persistence`), `design/drafter.py`, `design/basis.py`, `design/derive.py`, `tests/test_design.py`.
+
 ## v2.34: the radio start and stop moved into a core-0 task; and the v2.33 handshake fix was not a fix: the MQTT task has to be pinned to core 0 (12 Oct 2026)
 
 **Asked:** move the radio start and stop out of `loop()` into a core-0 task. **Done** (1 below). Testing it showed that the v2.33 conclusion ("run the MQTT task at the loop's priority and the handshake stall is gone") was wrong: the stall came straight back, for a reason a priority cannot fix (2). It is fixed now by pinning the esp-mqtt task to core 0 (3).
@@ -589,7 +698,7 @@ Changes: BusNode 2.12 (instrumented, ISR on core 0, one-transaction read), `scri
 
 ## v2.20: plan route finds the CLI on short paths; redraft evidence deduplicated (9 Oct 2026)
 
-- `design/llm.py`: the Claude Code binary is also looked for in `D:/Agents/tools/claude-code/claude.exe` (a copy of the desktop app's, short path, survives app updates) before the app's own versioned folder.
+- `design/llm.py`: the Claude Code binary is also looked for in a fixed tools folder (a copy of the desktop app's, short path, survives app updates) before the app's own versioned folder.
 - `design/drafter.py`: `fault_evidence` lists a scenario once even if it injects the same fault several times, so the facts sent back to the model in an auto-redraft are not repeated.
 - Live proof (SR-02, plan route, `--autonomous`): the first draft (single counter jump) was rejected with the bench's own evidence, Sonnet redrafted as 30 ms out-of-order delivery, 7/7 pass, nothing filed.
 - Test fix: binary discovery test no longer sees the shared copy.

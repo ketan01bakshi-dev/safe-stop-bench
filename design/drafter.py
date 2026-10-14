@@ -71,6 +71,23 @@ def alternatives(text: str) -> list[str]:
     return parts if len(parts) > 1 else []
 
 
+PERSIST = re.compile(r"\bpersists?\s*(?P<op>≥|>=|>|at least|more than)\s*(?P<n>\d+)\s*ms", re.I)
+RANGE = re.compile(r"outside\s*[−-]\s*(?P<lo>\d+(?:\.\d+)?)\s*(?:…|\.\.\.?)\s*\+?(?P<hi>\d+(?:\.\d+)?)", re.I)
+_OPS = {">": ">", "more than": ">", ">=": ">=", "≥": ">=", "at least": ">="}
+
+
+def persistence(text: str) -> dict | None:
+    """'... stop if it persists >= 50 ms': the controller's persistence time, found by code (it is not a fault parameter)."""
+    m = PERSIST.search(text)
+    return {"op": _OPS[m["op"].lower()], "ms": int(m["n"])} if m else None
+
+
+def value_range(text: str) -> tuple[float, float] | None:
+    """'outside -6...+2.5 m/s2': the two bounds of a range, found by code. A range has two sides to test."""
+    m = RANGE.search(text)
+    return (-float(m["lo"]), float(m["hi"])) if m else None
+
+
 def numbers(text: str) -> set[float]:
     return {float(x) for x in re.findall(r"(?<![\w.-])(\d+(?:\.\d+)?)", text)}
 
@@ -94,6 +111,14 @@ def prompt(req_id: str, text: str, cat: dict, causes: set[str], feedback: str = 
     alts = alternatives(text)
     lines = [f"- {f}: params {sorted(e['params']) or '[]'}; e.g. " + "; ".join(
         f"\"{x['title']}\" {json.dumps(x['fault'])} -> {x['reaction']} {x['cause'] or ''}" for x in e["examples"]) for f, e in sorted(cat.items())]
+    pers, rng = persistence(text), value_range(text)
+    extra_rules = ""
+    if pers:
+        extra_rules += (f"7. \"persists {pers['op']} {pers['ms']} ms\" is the controller's persistence time, not a fault parameter: set no "
+                        f"threshold and no duration for it (code derives the duration cases); name {pers['ms']} in an assumption.\n")
+    if rng:
+        extra_rules += (f"8. The range {rng[0]:g}..{rng[1]:g} has TWO sides: one trigger with a value above {rng[1]:g} and one with a value "
+                        f"below {rng[0]:g} (the bounds themselves go in assumptions, not thresholds).\n")
     sys_msg = ("You draft the TEST BASIS for one safety requirement of an autonomous-vehicle safety controller bench. "
                "The basis is the oracle a human will review, so be exact and never invent. Answer with one JSON object only.")
     user = f"""Requirement {req_id}: "{text}"
@@ -114,7 +139,7 @@ Rules:
 5. A number in the requirement that is a limit on a fault parameter goes in that trigger's "threshold"
    (e.g. "older than 60 ms" -> {{"param": "age_ms", "op": ">", "value": 60}}). Every other number goes in an assumption, named.
 6. Do not add behaviour the requirement does not state. Unclear points go in "open_questions".
-
+{extra_rules}
 Schema:
 {SCHEMA}"""
     if feedback:   # rejection reasons from basis_review: the reviewer's word beats the model's guess
@@ -151,6 +176,13 @@ def validate_event(d: dict, text: str, cat: dict, causes: set[str]) -> list[str]
                 errs.append(f"trigger {i + 1}: threshold op must be > or >=")
             if float(th.get("value", -1)) not in numbers(text):
                 errs.append(f"trigger {i + 1}: threshold value {th.get('value')} is not a number in the requirement")
+    rng = value_range(text)
+    if rng and trig:   # a range is two requirements: the controller must also react below the lower bound
+        vals = [v for t in trig for v in (t.get("params") or {}).values() if isinstance(v, (int, float))]
+        if not any(v > rng[1] for v in vals):
+            errs.append(f"the requirement gives the range {rng[0]:g}..{rng[1]:g}: a trigger must set a value above {rng[1]:g}")
+        if not any(v < rng[0] for v in vals):
+            errs.append(f"the requirement gives the range {rng[0]:g}..{rng[1]:g}: a trigger must set a value below {rng[0]:g}")
     alts = alternatives(text)
     hits: dict[str, int] = {a: 0 for a in alts}
     for i, x in enumerate(trig + ni):

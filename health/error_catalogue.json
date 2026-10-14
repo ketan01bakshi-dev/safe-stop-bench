@@ -38,5 +38,9 @@
   {"id": "uds-silent", "pattern": "no UDS response",
    "cause": "A board did not answer a TesterPresent / ReadDataByIdentifier request on the CAN bus: firmware without UDS (older than SafetyNode 2.7 / BusNode 2.8), a dead CAN link, or no second node to ACK the request.",
    "fix": ["Read the USB hello first: it names the firmware.", "Reflash with scripts/hil_flash.py if the version has no UDS.", "Check the CAN pair and termination."],
-   "source": "P2 UDS check"}
+   "source": "P2 UDS check"},
+  {"id": "omc-exec-failed", "pattern": "Simulation execution failed for model|Compile.bat not found",
+   "cause": "OpenModelica (1.26.9, Windows): right after a fresh compile the simulation executable sometimes fails to run and a re-run succeeds (cause not isolated; seen with and without spaces in the path). Or OpenModelica is still installing (Compile.bat missing).",
+   "fix": ["plant.ci re-launches the built executable up to 3 times and logs each retry as a TOOL event; if it still fails, re-run the stage.", "If Compile.bat is missing, wait for the OpenModelica installer to finish."],
+   "source": "P6 plant pipeline, 2026-10-14"}
 ]

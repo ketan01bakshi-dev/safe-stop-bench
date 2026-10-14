@@ -66,7 +66,7 @@ def main() -> int:
     ap.add_argument("--ros2-no-launch", action="store_true", help="with --dut ros2: don't start the reference node (a supplied node is running)")
     ap.add_argument("--file", default="fmu/SafeStopVecu.fmu", help="with --dut fmu: the FMU")
     ap.add_argument("--mapping", help="with --dut fmu: bench-name -> FMU-name JSON (default: identity)")
-    ap.add_argument("--plant", choices=["kinematic", "dynamic"], help="vehicle model (default: the config's, kinematic)")
+    ap.add_argument("--plant", help="vehicle model: kinematic | dynamic | fmu:<path> (a released SafeStopPlant FMU, P6); default: the config's, kinematic")
     ap.add_argument("--payload", type=float, help="with --plant dynamic: payload in kg on top of the curb mass")
     ap.add_argument("--load-sweep", action="store_true", help="with --plant dynamic: payload x grade sweep -> report")
     ap.add_argument("--mdf", action="store_true", help="also write each scenario's trace as MDF4 (.mf4, needs asammdf)")
@@ -80,7 +80,14 @@ def main() -> int:
     preflight = None   # set for a real-board HiL run (health/preflight.py)
     cfg = config.load(a.config)
     if a.plant:
-        cfg["plant"]["model"] = a.plant
+        if a.plant.startswith("fmu:"):
+            if not Path(a.plant[4:]).is_file():
+                ap.error(f"--plant {a.plant}: no such FMU")
+            cfg["plant"]["model"], cfg["plant"]["fmu"] = "fmu", a.plant[4:]
+        elif a.plant in ("kinematic", "dynamic"):
+            cfg["plant"]["model"] = a.plant
+        else:
+            ap.error("--plant must be kinematic, dynamic or fmu:<path>")
     if a.payload is not None:
         if cfg["plant"].get("model") != "dynamic":
             ap.error("--payload needs --plant dynamic")
@@ -169,7 +176,7 @@ def main() -> int:
         rows = campaigns.back_to_back(cfg, lambda sc: ReferenceDUT(cfg, frozenset([a.b2b]), warm_start=sc.get("start_kmh", 30) > 0))
         extras["b2b"] = {"other": f"reference[{a.b2b}]", "rows": rows}
 
-    label = a.label or "report" + ("_" + "_".join(sorted(defects)) if defects else "") + ("_offroad" if "offroad" in a.config else "") + ("_" + a.dut if a.dut != "reference" else "") + ("_dynamic" if cfg["plant"].get("model") == "dynamic" else "") + (f"_{a.payload:g}kg" if a.payload else "")
+    label = a.label or "report" + ("_" + "_".join(sorted(defects)) if defects else "") + ("_offroad" if "offroad" in a.config else "") + ("_" + a.dut if a.dut != "reference" else "") + ("_dynamic" if cfg["plant"].get("model") == "dynamic" else "") + ("_fmuplant" if cfg["plant"].get("model") == "fmu" else "") + (f"_{a.payload:g}kg" if a.payload else "")
     page = report.write_all(Path(__file__).resolve().parent / a.out, results, extras, label)
     mdf_files: list[Path] = []
     if a.mdf:
@@ -182,7 +189,7 @@ def main() -> int:
     firmware = None
     if a.dut in ("pil", "hil"):
         firmware = {"board_b": getattr(shared, "fw_b", None), "board_a": getattr(shared, "fw_a", None) if a.dut == "hil" else None}
-    run_info = {"level": a.dut, "config": a.config, "config_name": cfg["name"], "plant": cfg["plant"].get("model", "kinematic"),
+    run_info = {"level": a.dut, "config": a.config, "config_name": cfg["name"], "plant": cfg["plant"].get("model", "kinematic") + (f" {cfg['plant']['fmu']}" if cfg["plant"].get("model") == "fmu" else ""),
                 "defects": sorted(defects), "full": a.full, "repeat": a.repeat, "command": sys.argv, "preflight": preflight}
     manifest = report.write_manifest(page.parent, label, results, run_info, started, firmware, mdf_files)
     for r in results:

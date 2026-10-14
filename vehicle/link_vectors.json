@@ -1,0 +1,163 @@
+{
+ "about": "Golden frames of the P5 link, from vehicle/link.py; a firmware port must produce these bytes.",
+ "vectors": [
+  {
+   "name": "hello disarmed",
+   "message": {
+    "boot_id": 168496141,
+    "build": "p5-s1",
+    "state": 0,
+    "reason": 0,
+    "reject": 0,
+    "last_run_id": 41,
+    "type": "HELLO"
+   },
+   "hex": "533502010a0b0c0d70352d7331000000000000000000296ac3"
+  },
+  {
+   "name": "hello latched by dead-man, last arm refused",
+   "message": {
+    "boot_id": 168496141,
+    "build": "p5-s1",
+    "state": 2,
+    "reason": 1,
+    "reject": 4,
+    "last_run_id": 42,
+    "type": "HELLO"
+   },
+   "hex": "533502010a0b0c0d70352d73310000000201040000002af6e5"
+  },
+  {
+   "name": "arm",
+   "message": {
+    "boot_id": 168496141,
+    "run_id": 42,
+    "nonce": 3735928559,
+    "pwm_cap": 210,
+    "type": "ARM"
+   },
+   "hex": "533502020a0b0c0d0000002adeadbeefd21498"
+  },
+  {
+   "name": "setpoint at 20 km/h plan value",
+   "message": {
+    "run_id": 42,
+    "nonce": 3735928559,
+    "seq": 1,
+    "t_ms": 0,
+    "pwm_l": 170,
+    "pwm_r": 170,
+    "type": "SETPOINT"
+   },
+   "hex": "533502030000002adeadbeef000000010000000000aa00aabece"
+  },
+  {
+   "name": "setpoint at the largest field values",
+   "message": {
+    "run_id": 4294967295,
+    "nonce": 4294967295,
+    "seq": 4294967295,
+    "t_ms": 4294967295,
+    "pwm_l": 255,
+    "pwm_r": 255,
+    "type": "SETPOINT"
+   },
+   "hex": "53350203ffffffffffffffffffffffffffffffff00ff00ff18a8"
+  },
+  {
+   "name": "stop end of run",
+   "message": {
+    "run_id": 42,
+    "nonce": 3735928559,
+    "reason": 0,
+    "type": "STOP"
+   },
+   "hex": "533502040000002adeadbeef008cd8"
+  },
+  {
+   "name": "stop abort",
+   "message": {
+    "run_id": 42,
+    "nonce": 3735928559,
+    "reason": 1,
+    "type": "STOP"
+   },
+   "hex": "533502040000002adeadbeef019cf9"
+  },
+  {
+   "name": "echo armed, no encoders fitted",
+   "message": {
+    "boot_id": 168496141,
+    "run_id": 42,
+    "nonce": 3735928559,
+    "state": 1,
+    "reason": 0,
+    "reject": 0,
+    "seq": 17,
+    "pwm_l": 170,
+    "pwm_r": 170,
+    "uptime_ms": 123456,
+    "rx_ok": 20,
+    "rx_bad": 1,
+    "enc_t_ms": 0,
+    "enc_mask": 0,
+    "enc_fl": 0,
+    "enc_fr": 0,
+    "enc_rl": 0,
+    "enc_rr": 0,
+    "type": "ECHO"
+   },
+   "hex": "533502050a0b0c0d0000002adeadbeef0100000000001100aa00aa0001e24000140001000000000000000000000000000000000000000000f15d"
+  },
+  {
+   "name": "echo armed, four encoders",
+   "message": {
+    "boot_id": 168496141,
+    "run_id": 42,
+    "nonce": 3735928559,
+    "state": 1,
+    "reason": 0,
+    "reject": 0,
+    "seq": 17,
+    "pwm_l": 170,
+    "pwm_r": 170,
+    "uptime_ms": 123456,
+    "rx_ok": 20,
+    "rx_bad": 1,
+    "enc_t_ms": 123450,
+    "enc_mask": 15,
+    "enc_fl": 401,
+    "enc_fr": 398,
+    "enc_rl": 405,
+    "enc_rr": 4294967295,
+    "type": "ECHO"
+   },
+   "hex": "533502050a0b0c0d0000002adeadbeef0100000000001100aa00aa0001e240001400010001e23a0f000001910000018e00000195ffffffff4f60"
+  },
+  {
+   "name": "echo latched, two encoders (front pair)",
+   "message": {
+    "boot_id": 168496141,
+    "run_id": 42,
+    "nonce": 3735928559,
+    "state": 2,
+    "reason": 1,
+    "reject": 0,
+    "seq": 90,
+    "pwm_l": 0,
+    "pwm_r": 0,
+    "uptime_ms": 200000,
+    "rx_ok": 90,
+    "rx_bad": 0,
+    "enc_t_ms": 199990,
+    "enc_mask": 3,
+    "enc_fl": 1500,
+    "enc_fr": 1497,
+    "enc_rl": 0,
+    "enc_rr": 0,
+    "type": "ECHO"
+   },
+   "hex": "533502050a0b0c0d0000002adeadbeef0201000000005a0000000000030d40005a000000030d3603000005dc000005d900000000000000004823"
+  }
+ ]
+}

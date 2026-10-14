@@ -441,6 +441,39 @@ class ReleaseTests(unittest.TestCase):
         pf = {"ok": False, "level": "quick", "checks": [{"status": "fail", "detail": "no hello"}], "firmware": {}}
         self.assertEqual(release.decide(evidence(preflight=pf)).verdict, "BLOCKED")
 
+    def test_plant_release_evidence(self):
+        import hashlib
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            rel = Path(d)
+            (rel / "1.0.0").mkdir()
+            cert = rel / "1.0.0" / "maturity_certificate.json"
+            cert.write_text(json.dumps({"summary": {"L2": "15 / 15"}, "regression": {"scenarios": 56, "same_verdicts": True, "rows": []}}))
+            fmu = rel / "1.0.0" / "P.fmu"
+            fmu.write_bytes(b"fmu")
+            model = hashlib.sha256((ROOT / "plant" / "modelica" / "SafeStopPlant.mo").read_bytes()).hexdigest()
+            rec = {"version": "1.0.0", "level": "L2", "approved_by": "owner", "approved_at": "2026-10-14",
+                   "artifacts": {"certificate_sha256": hashlib.sha256(cert.read_bytes()).hexdigest(), "model_sha256": model},
+                   "fmus": {"P.fmu": hashlib.sha256(b"fmu").hexdigest(), "Absent.fmu": "00"}}
+            (rel / "latest.json").write_text(json.dumps(rec))
+            pr = release.plant_evidence(rel)
+            self.assertEqual(pr["problems"], [])
+            self.assertEqual(len(pr["notes"]), 1)            # an FMU not on disk is a note, not a failure (FMUs are not in git)
+            self.assertNotIn("rows", pr["regression"])
+            ev = evidence(plant_release=pr)
+            d = release.decide(ev)
+            self.assertEqual(d.verdict, "GO")
+            self.assertIn("Plant model SafeStopPlant 1.0.0", release.render(d, ev))
+            self.assertIn("not validated against measured", release.limits(ev)[-1][0])
+            fmu.write_bytes(b"tampered")                    # an FMU that differs from the approved hash blocks the release
+            self.assertEqual(release.decide(evidence(plant_release=release.plant_evidence(rel))).verdict, "BLOCKED")
+            fmu.write_bytes(b"fmu")
+            rec["artifacts"]["model_sha256"] = "0" * 64       # the model changed after the release: a risk, re-run plant.ci
+            (rel / "latest.json").write_text(json.dumps(rec))
+            self.assertEqual(release.decide(evidence(plant_release=release.plant_evidence(rel))).verdict, "GO WITH RISKS")
+            self.assertIsNone(release.plant_evidence(rel / "none"))   # no release at all: no plant evidence
+
     def test_report_renders_with_the_standing_limits(self):
         ev = evidence()
         text = release.render(release.decide(ev), ev)

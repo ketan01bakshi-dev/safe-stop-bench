@@ -23,6 +23,7 @@ from health import dashboard
 from ssb.config import ROOT
 
 REPORTS = ROOT / "reports"
+PLANT_RELEASES = ROOT / "plant" / "releases"
 OUT = REPORTS / "fleet"
 
 LIMITS = [  # what this evidence does NOT cover; always on the risk register
@@ -59,7 +60,45 @@ LIMIT_WIFI = ("The board's own Wi-Fi link is plain MQTT (no TLS) with one login 
 def limits(ev: dict) -> list[tuple[str, str, str]]:
     first = (LIMIT_TLS if ev.get("ota_wifi_tls_real") else LIMIT_WIFI if ev.get("ota_wifi_real") else LIMIT_MQTT if ev.get("ota_mqtt_real")
              else LIMIT_USB)
-    return [first] + LIMITS
+    out = [first] + LIMITS
+    if ev.get("plant_release"):
+        out.append(LIMIT_PLANT)
+    return out
+
+
+LIMIT_PLANT = ("The plant model (SafeStopPlant FMU) is verified against hand calculations and matched to the bench's own Python plant "
+               "(maturity L2); it is not validated against measured vehicle data (L3), and its parameters are illustrative", "Medium",
+               "Validate the P5 chassis motor model with stage-3 encoder data; calibrate the vehicle plant on a real vehicle log")
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def plant_evidence(releases: Path = PLANT_RELEASES) -> dict | None:
+    """The released plant model (P6): plant/releases/latest.json, checked against its own certificate copy, the FMUs on disk and the
+    current model source. None when no plant release exists (the bench's default plant is then the Python one)."""
+    rec = _load(releases / "latest.json")
+    if not rec:
+        return None
+    problems, notes = [], []
+    dest = releases / rec.get("version", "?")
+    cert_copy = dest / "maturity_certificate.json"
+    if not cert_copy.exists():
+        problems.append(f"certificate copy missing in {dest.name}")
+    elif _sha(cert_copy) != rec["artifacts"]["certificate_sha256"]:
+        problems.append("certificate copy does not match the hash the owner approved")
+    for name, h in (rec.get("fmus") or {}).items():
+        f = dest / name
+        if not f.exists():
+            notes.append(f"{name} not on this machine (FMUs are not in git); hash recorded only")
+        elif _sha(f) != h:
+            problems.append(f"{name} does not match the approved hash")
+    model = ROOT / "plant" / "modelica" / "SafeStopPlant.mo"
+    changed = model.exists() and _sha(model) != rec["artifacts"]["model_sha256"]
+    cert = _load(cert_copy) or {}
+    return {**rec, "problems": problems, "notes": notes, "model_changed": changed,
+            "summary": cert.get("summary") or {}, "regression": {k: v for k, v in (cert.get("regression") or {}).items() if k != "rows"}}
 
 
 def _load(path: Path):
@@ -82,6 +121,9 @@ def gather(reports: Path = REPORTS) -> dict:
              "ota_cut_wifi_tls_real": reports / "fleet" / "ota_cut_real_wifi_tls.json"}
     ev = {k: _load(p) for k, p in files.items()}
     ev["_files"] = {k: p for k, p in files.items() if p.exists()}
+    ev["plant_release"] = plant_evidence()
+    if ev["plant_release"]:
+        ev["_files"]["plant_release"] = PLANT_RELEASES / "latest.json"
     ev["dashboard"] = dashboard.build(reports / "design", reports / "health")
     return ev
 
@@ -121,6 +163,12 @@ def decide(ev: dict) -> Decision:
         no_go.append(f"the good build did not roll out cleanly: {good['committed']} committed, {good['rolled_back']} rolled back, halted={good['halted']}")
     if bad and not bad["halted"]:
         no_go.append("a bad build was NOT halted by the rollout's halt rule")
+    pr = ev.get("plant_release")
+    if pr:   # optional: the bench runs the Python plant unless --plant fmu: is given
+        if pr["problems"] or pr.get("level") not in ("L2", "L3"):
+            blocked.append(f"plant release {pr.get('version')} unusable: " + "; ".join(pr["problems"] or [f"level {pr.get('level')} (needs L2)"]))
+        elif pr["model_changed"]:
+            risks.append(f"plant model changed since release {pr['version']}: run python -m plant.ci all, then release again")
     for x in ev["dashboard"]["explained"]:
         if x["box"] in ("TEST", "BENCH", "GAP"):
             risks.append(f"{x['box']}: {x['case']} ({x['level']}) {x['verdict']}: {x['detail'] or x['meaning']}")
@@ -160,6 +208,13 @@ def render(d: Decision, ev: dict) -> str:
         if r:
             lines.append(f"| {label} | {r['committed']} committed, {r['rolled_back']} rolled back, {r['untouched']} untouched; "
                          f"{'HALTED: ' + r['halt_reason'] if r['halted'] else 'ran to the end'} |")
+    pr = ev.get("plant_release")
+    if pr:
+        reg = pr["regression"]
+        lines.append(f"| Plant model SafeStopPlant {pr['version']} | maturity {pr['level']} ("
+                     + ", ".join(f"{k} {v}" for k, v in pr["summary"].items()) + f"); bench regression {reg.get('scenarios')} scenarios, "
+                     f"same verdicts: {reg.get('same_verdicts')}; approved by {pr.get('approved_by')} {str(pr.get('approved_at'))[:10]}"
+                     + ("; MODEL CHANGED since release" if pr["model_changed"] else "") + " |")
     cov = ev["dashboard"]["coverage"]
     lines.append(f"| Design campaigns | {sum(v['total'] for lv in cov.values() for v in lv.values())} cases over {len(cov)} requirements (latest per level) |")
     lines += ["", "## Risks you accept with a GO WITH RISKS", ""] + ([f"- {r}" for r in d.risks] or ["- none open"])

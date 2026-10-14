@@ -54,6 +54,8 @@ class HumanGate:
         auto_approve: bool = False,
         approver: str = "cli",
         auto_actor: str = "demo-auto",
+        approve_hint: str = 'python -m design approve --campaign {campaign} --gate {gate} --by "<name>"',
+        reject_hint: str = 'python -m design reject --campaign {campaign} --gate {gate} --by "<name>" --reason "<what to fix>"',
     ) -> None:
         self.campaign_dir = campaign_dir
         self.approvals = dict(approvals or {})  # per-run CLI approvals (--approve <gate>)
@@ -61,6 +63,8 @@ class HumanGate:
         self.approver = approver
         # Who an automatic approval is recorded as: "demo-auto" (tests) or AGENT_AUTO + a label (autonomy test, 2026-10-09).
         self.auto_actor = auto_actor
+        # the commands printed in a review packet (other pipelines, e.g. plant.ci, reuse the gate with their own CLI)
+        self.approve_hint, self.reject_hint = approve_hint, reject_hint
         self.audit_path = campaign_dir / "audit.jsonl"
         self.store_path = campaign_dir / "gates" / "gates.json"
         self.decisions: dict[str, dict[str, Any]] = {}  # gate -> decision taken during this run
@@ -158,9 +162,8 @@ class HumanGate:
             f"- Previous decision: {previous.get('decision', 'none')}"
             + (f" by {previous.get('approver')}: {previous.get('comment')}" if previous.get("approver") else ""),
             "",
-            f"Approve:  `python -m design approve --campaign {self.campaign_dir.name} --gate {gate} --by \"<name>\"`",
-            f"Reject:   `python -m design reject --campaign {self.campaign_dir.name} --gate {gate}"
-            + " --by \"<name>\" --reason \"<what to fix>\"`",
+            f"Approve:  `{self.approve_hint.format(campaign=self.campaign_dir.name, gate=gate)}`",
+            f"Reject:   `{self.reject_hint.format(campaign=self.campaign_dir.name, gate=gate)}`",
             "",
         ]
         if summary_md:
