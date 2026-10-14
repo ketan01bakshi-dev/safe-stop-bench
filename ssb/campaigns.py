@@ -201,7 +201,9 @@ def back_to_back(cfg: dict, other_factory, tol_ms: int = 20, only=None, exact: b
             first = next((f"{x} vs {tuple(y)}" for x, y in zip(qa, rb["states"], strict=False) if x != tuple(y)),
                          f"{len(qa)} vs {len(rb['states'])} state changes")
             diffs.append(f"timeline differs: {first}")
-        if exact and (ra["v_end_kmh"], ra["max_lateral_m"]) != (rb["v_end_kmh"], rb["max_lateral_m"]):
+        # within one rounding step (0.01 km/h, 1 mm), not equal after rounding: two values 0.07 mm apart can still round apart
+        # (clock_drift over CAN, whose commands are quantised to 0.01 deg: 0.49150 vs 0.49144 m, v2.39)
+        if exact and (abs(ra["v_end_kmh"] - rb["v_end_kmh"]) > 0.0101 or abs(ra["max_lateral_m"] - rb["max_lateral_m"]) > 0.00101):
             diffs.append(f"plant end state {ra['v_end_kmh']}/{ra['max_lateral_m']} vs {rb['v_end_kmh']}/{rb['max_lateral_m']}")
         rows.append({"key": sc["key"], "match": not diffs, "diffs": diffs})
     return rows
